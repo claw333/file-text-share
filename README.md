@@ -1,6 +1,6 @@
-# 轻递
-
 <div align="center">
+
+<h1>轻递</h1>
 
 **跨设备传文字，传文件，轻一点。**
 
@@ -220,12 +220,10 @@ docker compose down
 
 ## Star History
 
-> 发布到 GitHub 后，把下面的 `OWNER/file-text-share` 替换为实际仓库地址。
-
-<a href="https://star-history.com/#OWNER/file-text-share&Date">
+<a href="https://star-history.com/#claw333/file-text-share&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=OWNER/file-text-share&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=OWNER/file-text-share&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=OWNER/file-text-share&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=claw333/file-text-share&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=claw333/file-text-share&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=claw333/file-text-share&type=Date" />
   </picture>
 </a>
