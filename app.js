@@ -4,10 +4,6 @@
   const page = document.body.dataset.page;
   let csrfToken = "";
 
-  function passwordIsValid(value) {
-    return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,128}$/.test(value);
-  }
-
   async function api(path, options) {
     const config = { credentials: "same-origin", ...options };
     config.headers = new Headers(config.headers || {});
@@ -42,7 +38,6 @@
   if (page === "login") {
     const passwordInput = document.querySelector("#password");
     const passwordToggle = document.querySelector(".password-toggle");
-    const passwordRule = document.querySelector("#password-rule");
     const form = document.querySelector("#login-form");
     const error = document.querySelector("#login-error");
 
@@ -55,15 +50,14 @@
     });
 
     passwordInput.addEventListener("input", function () {
-      passwordRule.classList.toggle("valid", passwordIsValid(passwordInput.value));
       error.hidden = true;
     });
 
     form.addEventListener("submit", async function (event) {
       event.preventDefault();
       const username = document.querySelector("#username").value.trim();
-      if (!username || !passwordIsValid(passwordInput.value)) {
-        error.textContent = "用户名或密码不符合要求，请检查后重试。";
+      if (!username || !passwordInput.value) {
+        error.textContent = "用户名或密码错误";
         error.hidden = false;
         return;
       }

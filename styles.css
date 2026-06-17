@@ -193,9 +193,7 @@ a { color: inherit; text-decoration: none; }
 .mobile-brand { display: none; }
 
 .field { display: block; margin-bottom: 22px; }
-.field-label, .field-label-row { display: block; margin-bottom: 8px; color: var(--ink); font-size: 13px; font-weight: 680; }
-.field-label-row { display: flex; justify-content: space-between; }
-.field-hint { color: var(--faint); font-weight: 500; }
+.field-label { display: block; margin-bottom: 8px; color: var(--ink); font-size: 13px; font-weight: 680; }
 
 .input-wrap { position: relative; display: flex; align-items: center; }
 .input-wrap > svg { position: absolute; left: 15px; width: 19px; height: 19px; color: var(--faint); pointer-events: none; }
@@ -207,16 +205,7 @@ a { color: inherit; text-decoration: none; }
 .password-toggle[aria-pressed="true"] .eye-open { display: none; }
 .password-toggle[aria-pressed="true"] .eye-closed { display: block; }
 
-.password-rule { display: flex; align-items: center; gap: 8px; margin: -10px 0 22px; color: var(--faint); font-size: 12px; }
-.rule-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
-.password-rule.valid { color: var(--blue); }
-.password-rule.valid .rule-dot { background: var(--teal); }
 .form-error { margin: -4px 0 16px; padding: 10px 12px; color: var(--red); border-radius: 8px; background: var(--red-soft); font-size: 13px; }
-
-.prototype-note { display: flex; gap: 10px; margin-top: 28px; padding: 14px 16px; color: var(--muted); border: 1px solid var(--line); border-radius: 12px; background: rgba(255, 255, 255, 0.65); font-size: 12px; }
-.prototype-note svg { width: 17px; height: 17px; flex: 0 0 auto; margin-top: 1px; color: var(--blue); }
-.prototype-note p { margin: 0; }
-.prototype-note strong { display: block; margin-bottom: 2px; color: var(--ink); }
 .login-footer { margin: 44px 0 0; color: var(--faint); font-size: 11px; letter-spacing: 0.05em; }
 
 /* App */
@@ -228,7 +217,6 @@ a { color: inherit; text-decoration: none; }
 .connection-status { display: flex; align-items: center; gap: 7px; margin-right: 10px; color: var(--blue); font-size: 12px; font-weight: 650; }
 .connection-status > span:first-child { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 4px rgba(245, 200, 66, 0.18); }
 .account-button { display: flex; min-height: 48px; align-items: center; gap: 10px; padding: 5px 10px 5px 6px; border: 0; border-radius: 12px; background: transparent; cursor: default; }
-.account-button > svg { width: 16px; height: 16px; color: var(--faint); }
 .avatar { display: grid; width: 36px; height: 36px; place-items: center; color: var(--navy-deep); border-radius: 10px; background: var(--teal-soft); font-weight: 760; }
 .account-copy { display: grid; text-align: left; line-height: 1.2; }
 .account-copy strong { font-size: 13px; }
@@ -267,8 +255,7 @@ a { color: inherit; text-decoration: none; }
 .character-count { color: var(--faint); font-size: 10px; }
 .character-count strong { color: var(--muted); font-weight: 560; }
 
-.drop-zone { display: flex; height: 166px; align-items: center; justify-content: center; gap: 15px; color: var(--muted); border: 1.5px dashed #b8c6df; border-radius: 12px; background: #f8faff; cursor: pointer; transition: border-color 160ms ease, background 160ms ease; }
-.drop-zone:hover, .drop-zone.dragging { border-color: var(--teal); background: var(--teal-soft); }
+.drop-zone { display: flex; height: 166px; align-items: center; justify-content: center; gap: 15px; color: var(--muted); border: 1.5px dashed #b8c6df; border-radius: 12px; background: #f8faff; cursor: pointer; }
 .drop-zone > span:last-child { display: grid; }
 .drop-zone strong { margin-bottom: 4px; color: var(--ink); font-size: 13px; }
 .drop-zone small { color: var(--faint); font-size: 11px; }
@@ -378,7 +365,7 @@ a { color: inherit; text-decoration: none; }
   .brand { font-size: 18px; }
   .brand-mark { width: 32px; height: 32px; border-radius: 9px; }
   .brand-mark svg { width: 25px; height: 25px; }
-  .status-full, .account-copy, .account-button > svg { display: none; }
+  .status-full, .account-copy { display: none; }
   .connection-status { margin-right: 2px; }
   .account-button { min-height: 42px; padding: 4px; }
   .avatar { width: 34px; height: 34px; }
