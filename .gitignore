@@ -1,0 +1,5 @@
+/data/
+/file-text-share
+.env
+.DS_Store
+*.log

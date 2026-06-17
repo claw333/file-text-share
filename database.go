@@ -1,0 +1,389 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+type database struct {
+	db *sql.DB
+}
+
+type user struct {
+	ID           int64
+	Username     string
+	PasswordHash string
+}
+
+type session struct {
+	TokenHash string
+	UserID    int64
+	Username  string
+	CSRFToken string
+	ExpiresAt time.Time
+}
+
+type eventRecord struct {
+	ID          int64     `json:"id"`
+	EventType   string    `json:"eventType"`
+	DeviceLabel string    `json:"deviceLabel"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type itemRecord struct {
+	ID             int64         `json:"id"`
+	Kind           string        `json:"kind"`
+	Text           string        `json:"text,omitempty"`
+	FileName       string        `json:"fileName,omitempty"`
+	FileSize       int64         `json:"fileSize,omitempty"`
+	MIMEType       string        `json:"mimeType,omitempty"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	ExpiresAt      time.Time     `json:"expiresAt"`
+	UploaderDevice string        `json:"uploaderDevice"`
+	Events         []eventRecord `json:"events"`
+}
+
+type fileRecord struct {
+	ID         int64
+	UserID     int64
+	StoredName string
+	FileName   string
+	FileSize   int64
+	MIMEType   string
+}
+
+func openDatabase(path string) (*database, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create database directory: %w", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	store := &database{db: db}
+	if err := store.migrate(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func (d *database) close() error {
+	return d.db.Close()
+}
+
+func (d *database) ping(ctx context.Context) error {
+	return d.db.PingContext(ctx)
+}
+
+func (d *database) migrate(ctx context.Context) error {
+	statements := []string{
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA foreign_keys = ON`,
+		`PRAGMA busy_timeout = 5000`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			token_hash TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			csrf_token TEXT NOT NULL,
+			device_label TEXT NOT NULL,
+			ip_address TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS texts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			body TEXT NOT NULL,
+			uploader_device TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS texts_user_created_idx ON texts(user_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS texts_expires_idx ON texts(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			original_name TEXT NOT NULL,
+			stored_name TEXT NOT NULL UNIQUE,
+			size_bytes INTEGER NOT NULL,
+			mime_type TEXT NOT NULL,
+			uploader_device TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS files_user_created_idx ON files(user_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS files_expires_idx ON files(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			item_kind TEXT NOT NULL CHECK(item_kind IN ('text', 'file')),
+			item_id INTEGER NOT NULL,
+			event_type TEXT NOT NULL CHECK(event_type IN ('copy', 'download')),
+			device_label TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS events_item_idx ON events(user_id, item_kind, item_id, created_at DESC)`,
+	}
+	for _, statement := range statements {
+		if _, err := d.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("run database migration: %w", err)
+		}
+	}
+	return nil
+}
+
+func (d *database) setUserPassword(ctx context.Context, username, passwordHash string, now time.Time) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users(username, password_hash, created_at, updated_at)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at
+	`, username, passwordHash, now.Unix(), now.Unix()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM sessions
+		WHERE user_id = (SELECT id FROM users WHERE username = ?)
+	`, username); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *database) findUser(ctx context.Context, username string) (user, error) {
+	var result user
+	err := d.db.QueryRowContext(ctx, `SELECT id, username, password_hash FROM users WHERE username = ?`, username).
+		Scan(&result.ID, &result.Username, &result.PasswordHash)
+	return result, err
+}
+
+func (d *database) createSession(ctx context.Context, tokenHash string, userID int64, csrfToken, device, ip string, now time.Time) error {
+	_, err := d.db.ExecContext(ctx, `
+		INSERT INTO sessions(token_hash, user_id, csrf_token, device_label, ip_address, created_at, expires_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+	`, tokenHash, userID, csrfToken, device, ip, now.Unix(), now.Add(sessionTTL).Unix())
+	return err
+}
+
+func (d *database) getSession(ctx context.Context, hash string, now time.Time) (session, error) {
+	var result session
+	var expires int64
+	err := d.db.QueryRowContext(ctx, `
+		SELECT s.token_hash, s.user_id, u.username, s.csrf_token, s.expires_at
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.token_hash = ? AND s.expires_at > ?
+	`, hash, now.Unix()).Scan(&result.TokenHash, &result.UserID, &result.Username, &result.CSRFToken, &expires)
+	result.ExpiresAt = time.Unix(expires, 0).UTC()
+	return result, err
+}
+
+func (d *database) deleteSession(ctx context.Context, hash string) error {
+	_, err := d.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, hash)
+	return err
+}
+
+func (d *database) createText(ctx context.Context, userID int64, body, device string, now time.Time) (int64, error) {
+	result, err := d.db.ExecContext(ctx, `
+		INSERT INTO texts(user_id, body, uploader_device, created_at, expires_at) VALUES(?, ?, ?, ?, ?)
+	`, userID, body, device, now.Unix(), now.Add(textTTL).Unix())
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (d *database) createFile(ctx context.Context, record fileRecord, device string, now time.Time) (int64, error) {
+	result, err := d.db.ExecContext(ctx, `
+		INSERT INTO files(user_id, original_name, stored_name, size_bytes, mime_type, uploader_device, created_at, expires_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+	`, record.UserID, record.FileName, record.StoredName, record.FileSize, record.MIMEType, device, now.Unix(), now.Add(fileTTL).Unix())
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (d *database) getFile(ctx context.Context, userID, fileID int64, now time.Time) (fileRecord, error) {
+	var result fileRecord
+	err := d.db.QueryRowContext(ctx, `
+		SELECT id, user_id, stored_name, original_name, size_bytes, mime_type
+		FROM files WHERE id = ? AND user_id = ? AND expires_at > ?
+	`, fileID, userID, now.Unix()).Scan(&result.ID, &result.UserID, &result.StoredName, &result.FileName, &result.FileSize, &result.MIMEType)
+	return result, err
+}
+
+func (d *database) addEvent(ctx context.Context, userID int64, kind string, itemID int64, eventType, device string, now time.Time) error {
+	table := "texts"
+	if kind == "file" {
+		table = "files"
+	}
+	var exists int
+	query := fmt.Sprintf(`SELECT 1 FROM %s WHERE id = ? AND user_id = ? AND expires_at > ?`, table)
+	if err := d.db.QueryRowContext(ctx, query, itemID, userID, now.Unix()).Scan(&exists); err != nil {
+		return err
+	}
+	_, err := d.db.ExecContext(ctx, `
+		INSERT INTO events(user_id, item_kind, item_id, event_type, device_label, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+	`, userID, kind, itemID, eventType, device, now.Unix())
+	return err
+}
+
+func (d *database) deleteItem(ctx context.Context, userID int64, kind string, itemID int64) (string, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	storedName := ""
+	if kind == "file" {
+		if err := tx.QueryRowContext(ctx, `SELECT stored_name FROM files WHERE id = ? AND user_id = ?`, itemID, userID).Scan(&storedName); err != nil {
+			return "", err
+		}
+	}
+	table := "texts"
+	if kind == "file" {
+		table = "files"
+	}
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE id = ? AND user_id = ?`, table), itemID, userID)
+	if err != nil {
+		return "", err
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count != 1 {
+		return "", sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE user_id = ? AND item_kind = ? AND item_id = ?`, userID, kind, itemID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return storedName, nil
+}
+
+func (d *database) listItems(ctx context.Context, userID int64, now time.Time) ([]itemRecord, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT id, 'text', body, '', 0, '', uploader_device, created_at, expires_at FROM texts
+		WHERE user_id = ? AND expires_at > ?
+		UNION ALL
+		SELECT id, 'file', '', original_name, size_bytes, mime_type, uploader_device, created_at, expires_at FROM files
+		WHERE user_id = ? AND expires_at > ?
+		ORDER BY created_at DESC
+	`, userID, now.Unix(), userID, now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]itemRecord, 0)
+	for rows.Next() {
+		var item itemRecord
+		var created, expires int64
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Text, &item.FileName, &item.FileSize, &item.MIMEType, &item.UploaderDevice, &created, &expires); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = time.Unix(created, 0).UTC()
+		item.ExpiresAt = time.Unix(expires, 0).UTC()
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].Events, err = d.listEvents(ctx, userID, items[index].Kind, items[index].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+func (d *database) listEvents(ctx context.Context, userID int64, kind string, itemID int64) ([]eventRecord, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT id, event_type, device_label, created_at FROM events
+		WHERE user_id = ? AND item_kind = ? AND item_id = ? ORDER BY created_at DESC
+	`, userID, kind, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := make([]eventRecord, 0)
+	for rows.Next() {
+		var event eventRecord
+		var created int64
+		if err := rows.Scan(&event.ID, &event.EventType, &event.DeviceLabel, &created); err != nil {
+			return nil, err
+		}
+		event.CreatedAt = time.Unix(created, 0).UTC()
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (d *database) expiredFileNames(ctx context.Context, now time.Time) ([]string, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT stored_name FROM files WHERE expires_at <= ?`, now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+func (d *database) deleteExpired(ctx context.Context, now time.Time) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`DELETE FROM events WHERE item_kind = 'text' AND item_id IN (SELECT id FROM texts WHERE expires_at <= ?)`,
+		`DELETE FROM events WHERE item_kind = 'file' AND item_id IN (SELECT id FROM files WHERE expires_at <= ?)`,
+		`DELETE FROM texts WHERE expires_at <= ?`,
+		`DELETE FROM files WHERE expires_at <= ?`,
+		`DELETE FROM sessions WHERE expires_at <= ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement, now.Unix()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func isNotFound(err error) bool {
+	return errors.Is(err, sql.ErrNoRows)
+}

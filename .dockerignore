@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+data
+deploy
+README.md
+file-text-share
+*.log
+.DS_Store

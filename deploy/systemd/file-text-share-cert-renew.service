@@ -1,0 +1,14 @@
+[Unit]
+Description=Renew file-text-share TLS certificate
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@APP_USER@
+Group=@APP_GROUP@
+WorkingDirectory=@APP_DIR@
+ExecStart=@APP_DIR@/deploy/renew-cert.sh
+NoNewPrivileges=true
+PrivateTmp=true

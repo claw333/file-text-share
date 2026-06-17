@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>轻递 · 共享空间</title>
+    <link rel="stylesheet" href="styles.css?v=backend-1" />
+  </head>
+  <body class="app-body" data-page="share">
+    <header class="app-header">
+      <div class="page-width header-inner">
+        <a class="brand" href="share.html" aria-label="轻递共享空间">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 36 36"><path d="M8 11.5h20M8 24.5h20M12 7l-4 4.5 4 4.5M24 20l4 4.5-4 4.5" /></svg>
+          </span>
+          <span>轻递</span>
+        </a>
+
+        <div class="header-actions">
+          <div class="connection-status" title="当前连接安全">
+            <span></span>
+            <span class="status-full">安全连接</span>
+          </div>
+          <button class="account-button" id="account-menu" type="button" aria-label="账号菜单">
+            <span class="avatar" id="account-avatar">U</span>
+            <span class="account-copy"><strong id="account-name">用户</strong><small>私人空间</small></span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+          </button>
+          <button class="icon-button logout-button" id="logout-button" type="button" aria-label="退出登录" title="退出登录">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" /></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-width app-main">
+      <section class="welcome-row">
+        <div>
+          <p class="eyebrow">MY PRIVATE RELAY</p>
+          <h1><span id="greeting">你好</span>，<span id="welcome-name">用户</span></h1>
+          <p>从这台设备发送内容，在另一台设备上继续。</p>
+        </div>
+        <div class="retention-summary" aria-label="自动保留规则">
+          <div><span class="summary-icon text-icon">T</span><span><strong>文本</strong><small>保留 30 天</small></span></div>
+          <div><span class="summary-icon file-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6zM14 2v5h5" /></svg></span><span><strong>文件</strong><small>保留 7 天</small></span></div>
+        </div>
+      </section>
+
+      <section class="composer-grid" aria-label="发布共享内容">
+        <article class="composer-card text-composer">
+          <div class="card-heading">
+            <span class="section-icon text-icon">T</span>
+            <div><h2>共享文本</h2><p>粘贴链接、代码或临时消息</p></div>
+          </div>
+          <label class="sr-only" for="shared-text">要共享的文本</label>
+          <textarea id="shared-text" maxlength="100000" placeholder="在此输入或粘贴文本…"></textarea>
+          <div class="composer-footer">
+            <span class="character-count"><strong id="character-count">0</strong> / 100,000</span>
+            <button class="button button-primary" id="publish-text" type="button" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></svg>
+              发送文本
+            </button>
+          </div>
+        </article>
+
+        <article class="composer-card file-composer">
+          <div class="card-heading">
+            <span class="section-icon file-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6zM14 2v5h5" /></svg></span>
+            <div><h2>共享文件</h2><p>单个文件最大 1 GB</p></div>
+          </div>
+          <input class="sr-only" id="file-input" type="file" />
+          <label class="drop-zone" id="drop-zone" for="file-input">
+            <span class="upload-illustration" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M5 20h14" /></svg>
+            </span>
+            <span><strong>拖放文件到这里</strong><small>或点击选择文件</small></span>
+          </label>
+          <div class="upload-progress" id="upload-progress" hidden>
+            <div class="upload-file-row"><span id="upload-file-name">文件名</span><strong id="upload-percent">0%</strong></div>
+            <div class="progress-track"><span id="upload-bar"></span></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="content-section" aria-labelledby="recent-title">
+        <div class="section-heading-row">
+          <div>
+            <p class="eyebrow">RECENT ACTIVITY</p>
+            <h2 id="recent-title">最近共享</h2>
+          </div>
+          <div class="filter-tabs" role="group" aria-label="筛选共享内容">
+            <button class="filter-tab active" type="button" data-filter="all">全部 <span id="all-count">4</span></button>
+            <button class="filter-tab" type="button" data-filter="text">文本</button>
+            <button class="filter-tab" type="button" data-filter="file">文件</button>
+          </div>
+        </div>
+
+        <div class="item-list" id="item-list" aria-live="polite">
+          <article class="share-item prototype-item" data-kind="text" data-item-id="text-1" hidden>
+            <div class="item-main">
+              <div class="item-type-badge text-icon">T</div>
+              <div class="item-content">
+                <div class="item-topline">
+                  <span class="kind-label">文本</span>
+                  <span class="status-chip status-used"><span></span>已复制 2 次</span>
+                </div>
+                <p class="text-preview">会议链接：https://meet.example.com/design-review<br />访问码：462 810</p>
+                <div class="item-meta">
+                  <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><time data-offset-seconds="-246">今天 14:26:08</time></span>
+                  <span><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3" /><path d="M9 17h6" /></svg>iPhone · Safari · iOS</span>
+                  <span class="expiry"><svg viewBox="0 0 24 24"><path d="M6 8h12M9 3v3M15 3v3M5 5h14v16H5z" /></svg>29 天后清理</span>
+                </div>
+                <div class="history-panel" hidden>
+                  <div class="history-title"><strong>使用记录</strong><span>共 2 次</span></div>
+                  <ol>
+                    <li><span class="history-device"><i></i><span><strong>Windows PC · Chrome</strong><small><time data-offset-seconds="-89">今天 14:28:45</time> · 复制成功</small></span></span></li>
+                    <li><span class="history-device"><i></i><span><strong>Mac · Safari</strong><small><time data-offset-seconds="-162">今天 14:27:32</time> · 复制成功</small></span></span></li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+            <div class="item-actions">
+              <button class="button button-soft action-copy" type="button" data-text="会议链接：https://meet.example.com/design-review\n访问码：462 810">
+                <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>复制
+              </button>
+              <button class="icon-button action-history" type="button" aria-label="展开使用记录" title="使用记录"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2" /></svg></button>
+              <button class="icon-button action-delete" type="button" aria-label="删除文本" title="删除"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>
+            </div>
+          </article>
+
+          <article class="share-item prototype-item" data-kind="file" data-item-id="file-1" hidden>
+            <div class="item-main">
+              <div class="item-type-badge file-icon"><svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6zM14 2v5h5" /></svg></div>
+              <div class="item-content">
+                <div class="item-topline"><span class="kind-label">文件 · PDF</span><span class="status-chip status-used"><span></span>已下载 1 次</span></div>
+                <p class="file-name">产品需求说明书_v2.3.pdf</p>
+                <div class="item-meta">
+                  <span>4.8 MB</span>
+                  <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><time data-offset-seconds="-7520">今天 12:24:14</time></span>
+                  <span><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2" /><path d="M8 21h8M12 18v3" /></svg>Mac · Chrome · macOS</span>
+                  <span class="expiry"><svg viewBox="0 0 24 24"><path d="M6 8h12M9 3v3M15 3v3M5 5h14v16H5z" /></svg>6 天后清理</span>
+                </div>
+                <div class="history-panel" hidden>
+                  <div class="history-title"><strong>下载记录</strong><span>共 1 次</span></div>
+                  <ol><li><span class="history-device"><i></i><span><strong>iPhone · Safari · iOS</strong><small><time data-offset-seconds="-3900">今天 13:24:34</time> · 下载完成</small></span></span></li></ol>
+                </div>
+              </div>
+            </div>
+            <div class="item-actions">
+              <button class="button button-soft action-download" type="button" data-file-name="产品需求说明书_v2.3.pdf"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>下载</button>
+              <button class="icon-button action-history" type="button" aria-label="展开下载记录" title="下载记录"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2" /></svg></button>
+              <button class="icon-button action-delete" type="button" aria-label="删除文件" title="删除"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>
+            </div>
+          </article>
+
+          <article class="share-item prototype-item" data-kind="text" data-item-id="text-2" hidden>
+            <div class="item-main">
+              <div class="item-type-badge text-icon">T</div>
+              <div class="item-content">
+                <div class="item-topline"><span class="kind-label">文本</span><span class="status-chip status-new"><span></span>尚未使用</span></div>
+                <p class="text-preview">docker compose pull &amp;&amp; docker compose up -d</p>
+                <div class="item-meta">
+                  <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><time data-offset-seconds="-9010">今天 11:59:24</time></span>
+                  <span><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2" /><path d="M8 21h8M12 18v3" /></svg>Windows PC · Edge</span>
+                  <span class="expiry"><svg viewBox="0 0 24 24"><path d="M6 8h12M9 3v3M15 3v3M5 5h14v16H5z" /></svg>29 天后清理</span>
+                </div>
+                <div class="history-panel empty-history" hidden>尚无使用记录</div>
+              </div>
+            </div>
+            <div class="item-actions">
+              <button class="button button-soft action-copy" type="button" data-text="docker compose pull && docker compose up -d"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>复制</button>
+              <button class="icon-button action-history" type="button" aria-label="展开使用记录" title="使用记录"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2" /></svg></button>
+              <button class="icon-button action-delete" type="button" aria-label="删除文本" title="删除"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>
+            </div>
+          </article>
+
+          <article class="share-item expiring-item prototype-item" data-kind="file" data-item-id="file-2" hidden>
+            <div class="item-main">
+              <div class="item-type-badge archive-icon">ZIP</div>
+              <div class="item-content">
+                <div class="item-topline"><span class="kind-label">文件 · ZIP</span><span class="status-chip status-new"><span></span>尚未下载</span></div>
+                <p class="file-name">website-assets-final.zip</p>
+                <div class="item-meta">
+                  <span>126.4 MB</span>
+                  <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg><time data-offset-seconds="-518400">6 天前 09:16:02</time></span>
+                  <span><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3" /><path d="M9 17h6" /></svg>Android · Chrome</span>
+                  <span class="expiry expiry-soon"><svg viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01M10 3 2 20h20L14 3z" /></svg>18 小时后清理</span>
+                </div>
+                <div class="history-panel empty-history" hidden>尚无下载记录</div>
+              </div>
+            </div>
+            <div class="item-actions">
+              <button class="button button-soft action-download" type="button" data-file-name="website-assets-final.zip"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>下载</button>
+              <button class="icon-button action-history" type="button" aria-label="展开下载记录" title="下载记录"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2" /></svg></button>
+              <button class="icon-button action-delete" type="button" aria-label="删除文件" title="删除"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>
+            </div>
+          </article>
+        </div>
+
+        <div class="empty-state" id="empty-state" hidden>
+          <span class="empty-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16v13H4zM8 4h8l2 3M9 13h6" /></svg></span>
+          <h3>这里还没有内容</h3>
+          <p>从上方发送一段文本或选择一个文件。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer page-width">
+      <p><span></span>所有时间按当前设备时区显示，精确到秒</p>
+      <p>轻递 · 私人跨设备共享空间</p>
+    </footer>
+
+    <div class="modal-backdrop" id="delete-modal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+        <button class="icon-button modal-close" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m5 5 14 14M19 5 5 19" /></svg></button>
+        <span class="modal-warning"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></span>
+        <h2 id="delete-title">删除这项内容？</h2>
+        <p id="delete-description">删除后，其他设备将无法再访问，并且无法恢复。</p>
+        <div class="modal-actions">
+          <button class="button button-ghost modal-cancel" type="button">取消</button>
+          <button class="button button-danger modal-confirm" type="button">确认删除</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="toast-region" aria-live="polite" aria-atomic="true">
+      <div class="toast" id="toast" hidden>
+        <span class="toast-icon"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg></span>
+        <span id="toast-message">操作成功</span>
+      </div>
+    </div>
+
+    <script src="app.js?v=backend-1"></script>
+  </body>
+</html>

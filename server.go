@@ -1,0 +1,694 @@
+package main
+
+import (
+	"context"
+	"crypto/subtle"
+	"database/sql"
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"mime"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+)
+
+//go:embed index.html share.html styles.css app.js
+var staticFiles embed.FS
+
+const (
+	sessionCookieName         = "share_session"
+	downloadTicketCookieName  = "share_download_ticket_"
+	loginIPAttemptPrefix      = "ip:"
+	loginAccountAttemptPrefix = "account:"
+)
+
+type loginAttempt struct {
+	failures    int
+	lockedUntil time.Time
+}
+
+type downloadTicket struct {
+	fileID      int64
+	sessionHash string
+	expiresAt   time.Time
+}
+
+type server struct {
+	cfg       config
+	db        *database
+	logger    *slog.Logger
+	now       func() time.Time
+	attemptMu sync.Mutex
+	attempts  map[string]loginAttempt
+	ticketMu  sync.Mutex
+	tickets   map[string]downloadTicket
+}
+
+func newServer(cfg config, db *database, logger *slog.Logger) *server {
+	return &server{
+		cfg:      cfg,
+		db:       db,
+		logger:   logger,
+		now:      func() time.Time { return time.Now().UTC().Truncate(time.Second) },
+		attempts: make(map[string]loginAttempt),
+		tickets:  make(map[string]downloadTicket),
+	}
+}
+
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /index.html", s.handleIndex)
+	mux.HandleFunc("GET /share.html", s.handleSharePage)
+	mux.HandleFunc("GET /styles.css", s.serveStatic("styles.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /app.js", s.serveStatic("app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("GET /api/session", s.withSession(s.handleSession))
+	mux.HandleFunc("POST /api/logout", s.withSession(s.withCSRF(s.handleLogout)))
+	mux.HandleFunc("GET /api/items", s.withSession(s.handleItems))
+	mux.HandleFunc("POST /api/texts", s.withSession(s.withCSRF(s.handleCreateText)))
+	mux.HandleFunc("POST /api/texts/{id}/copy", s.withSession(s.withCSRF(s.handleCopyText)))
+	mux.HandleFunc("DELETE /api/texts/{id}", s.withSession(s.withCSRF(s.handleDeleteText)))
+	mux.HandleFunc("POST /api/files", s.withSession(s.withCSRF(s.handleUploadFile)))
+	mux.HandleFunc("POST /api/files/{id}/download-ticket", s.withSession(s.withCSRF(s.handleDownloadTicket)))
+	mux.HandleFunc("GET /api/files/{id}/download", s.withSession(s.handleDownloadFile))
+	mux.HandleFunc("DELETE /api/files/{id}", s.withSession(s.withCSRF(s.handleDeleteFile)))
+	return s.securityHeaders(s.requestLog(mux))
+}
+
+func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.db.ping(ctx); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "服务暂不可用")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+type contextKey string
+
+const sessionContextKey contextKey = "session"
+
+func sessionFromContext(ctx context.Context) session {
+	return ctx.Value(sessionContextKey).(session)
+}
+
+func (s *server) withSession(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess, err := s.readSession(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "请先登录")
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), sessionContextKey, sess)))
+	}
+}
+
+func (s *server) withCSRF(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFromContext(r.Context())
+		provided := r.Header.Get("X-CSRF-Token")
+		if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(sess.CSRFToken)) != 1 {
+			writeError(w, http.StatusForbidden, "安全校验失败，请刷新页面后重试")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *server) readSession(r *http.Request) (session, error) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return session{}, sql.ErrNoRows
+	}
+	return s.db.getSession(r.Context(), tokenHash(cookie.Value), s.now())
+}
+
+func (s *server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *server) requestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		next.ServeHTTP(w, r)
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/login" {
+			return
+		}
+		s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(started).Milliseconds())
+	})
+}
+
+func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := s.readSession(r); err == nil {
+		http.Redirect(w, r, "/share.html", http.StatusSeeOther)
+		return
+	}
+	s.serveStatic("index.html", "text/html; charset=utf-8")(w, r)
+}
+
+func (s *server) handleSharePage(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.readSession(r); err != nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	s.serveStatic("share.html", "text/html; charset=utf-8")(w, r)
+}
+
+func (s *server) serveStatic(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		content, err := staticFiles.ReadFile(name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(content)
+	}
+}
+
+func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		return
+	}
+	input.Username = strings.TrimSpace(input.Username)
+	ipKey, accountKey := s.loginAttemptKeys(r, input.Username)
+	if delay, locked := s.loginDelay(ipKey, accountKey); locked {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(delay.Seconds())+1))
+		writeError(w, http.StatusTooManyRequests, "登录尝试过多，请稍后再试")
+		return
+	} else if delay > 0 {
+		time.Sleep(delay)
+	}
+
+	account, err := s.db.findUser(r.Context(), input.Username)
+	passwordOK := false
+	if err == nil {
+		passwordOK = verifyPassword(account.PasswordHash, input.Password)
+	} else {
+		consumePasswordVerificationCost(input.Password)
+	}
+	if err != nil || !passwordOK {
+		s.recordLoginFailure(ipKey, accountKey)
+		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
+		return
+	}
+	s.clearLoginFailures(ipKey, accountKey)
+
+	token, err := randomToken(32)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "登录失败")
+		return
+	}
+	csrf, err := randomToken(24)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "登录失败")
+		return
+	}
+	if err := s.db.createSession(r.Context(), tokenHash(token), account.ID, csrf, simplifyUserAgent(r.UserAgent()), s.clientIP(r), s.now()); err != nil {
+		s.logger.Error("create session", "error", err)
+		writeError(w, http.StatusInternalServerError, "登录失败")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(sessionTTL.Seconds()),
+		Secure:   s.cfg.cookieSecure,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"username": account.Username, "csrfToken": csrf})
+}
+
+func (s *server) handleSession(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"username": sess.Username, "csrfToken": sess.CSRFToken})
+}
+
+func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	if err := s.db.deleteSession(r.Context(), sess.TokenHash); err != nil {
+		s.logger.Error("delete session", "error", err)
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, Secure: s.cfg.cookieSecure, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleItems(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	items, err := s.db.listItems(r.Context(), sess.UserID, s.now())
+	if err != nil {
+		s.logger.Error("list items", "error", err)
+		writeError(w, http.StatusInternalServerError, "读取共享内容失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *server) handleCreateText(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Text string `json:"text"`
+	}
+	if err := decodeJSON(w, r, &input, 512<<10); err != nil {
+		return
+	}
+	input.Text = strings.TrimSpace(input.Text)
+	if input.Text == "" || utf8.RuneCountInString(input.Text) > maxTextRunes {
+		writeError(w, http.StatusBadRequest, "文本不能为空且不能超过 100,000 字符")
+		return
+	}
+	sess := sessionFromContext(r.Context())
+	id, err := s.db.createText(r.Context(), sess.UserID, input.Text, simplifyUserAgent(r.UserAgent()), s.now())
+	if err != nil {
+		s.logger.Error("create text", "error", err)
+		writeError(w, http.StatusInternalServerError, "发送文本失败")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+func (s *server) handleCopyText(w http.ResponseWriter, r *http.Request) {
+	s.handleEvent(w, r, "text", "copy")
+}
+
+func (s *server) handleEvent(w http.ResponseWriter, r *http.Request, kind, eventType string) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无效的内容编号")
+		return
+	}
+	sess := sessionFromContext(r.Context())
+	if err := s.db.addEvent(r.Context(), sess.UserID, kind, id, eventType, simplifyUserAgent(r.UserAgent()), s.now()); err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "内容不存在或已过期")
+			return
+		}
+		s.logger.Error("add event", "error", err)
+		writeError(w, http.StatusInternalServerError, "记录操作失败")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleDeleteText(w http.ResponseWriter, r *http.Request) {
+	s.handleDeleteItem(w, r, "text")
+}
+
+func (s *server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	s.handleDeleteItem(w, r, "file")
+}
+
+func (s *server) handleDeleteItem(w http.ResponseWriter, r *http.Request, kind string) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无效的内容编号")
+		return
+	}
+	sess := sessionFromContext(r.Context())
+	storedName, err := s.db.deleteItem(r.Context(), sess.UserID, kind, id)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "内容不存在")
+			return
+		}
+		s.logger.Error("delete item", "error", err)
+		writeError(w, http.StatusInternalServerError, "删除失败")
+		return
+	}
+	if storedName != "" {
+		if err := os.Remove(filepath.Join(s.cfg.uploadDir, storedName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Error("remove uploaded file", "error", err)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
+	if err := os.MkdirAll(s.cfg.uploadDir, 0o700); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建上传目录失败")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxFileBytes+(1<<20))
+	reader, err := r.MultipartReader()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无效的上传请求")
+		return
+	}
+	part, err := reader.NextPart()
+	if err != nil || part.FormName() != "file" || part.FileName() == "" {
+		writeError(w, http.StatusBadRequest, "请选择一个文件")
+		return
+	}
+	defer part.Close()
+
+	originalName := filepath.Base(strings.ReplaceAll(part.FileName(), "\\", "/"))
+	if originalName == "." || originalName == "" || utf8.RuneCountInString(originalName) > 255 {
+		writeError(w, http.StatusBadRequest, "无效的文件名")
+		return
+	}
+	storedName, err := randomID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "上传失败")
+		return
+	}
+	temp, err := os.CreateTemp(s.cfg.uploadDir, ".upload-*")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "上传失败")
+		return
+	}
+	tempPath := temp.Name()
+	committed := false
+	defer func() {
+		temp.Close()
+		if !committed {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	written, err := io.Copy(temp, io.LimitReader(part, maxFileBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "文件上传中断")
+		return
+	}
+	if written > maxFileBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "单个文件不能超过 1 GB")
+		return
+	}
+	if err := temp.Sync(); err != nil || temp.Close() != nil {
+		writeError(w, http.StatusInternalServerError, "保存文件失败")
+		return
+	}
+
+	finalPath := filepath.Join(s.cfg.uploadDir, storedName)
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存文件失败")
+		return
+	}
+	tempPath = finalPath
+
+	mimeType := detectMIMEType(finalPath)
+	sess := sessionFromContext(r.Context())
+	id, err := s.db.createFile(r.Context(), fileRecord{
+		UserID:     sess.UserID,
+		StoredName: storedName,
+		FileName:   originalName,
+		FileSize:   written,
+		MIMEType:   mimeType,
+	}, simplifyUserAgent(r.UserAgent()), s.now())
+	if err != nil {
+		s.logger.Error("create file metadata", "error", err)
+		writeError(w, http.StatusInternalServerError, "保存文件信息失败")
+		return
+	}
+	committed = true
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+func detectMIMEType(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return "application/octet-stream"
+	}
+	defer file.Close()
+	buffer := make([]byte, 512)
+	count, _ := file.Read(buffer)
+	return http.DetectContentType(buffer[:count])
+}
+
+func (s *server) handleDownloadTicket(w http.ResponseWriter, r *http.Request) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无效的文件编号")
+		return
+	}
+	sess := sessionFromContext(r.Context())
+	if _, err := s.db.getFile(r.Context(), sess.UserID, id, s.now()); err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "文件不存在或已过期")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "准备下载失败")
+		return
+	}
+	token, err := randomToken(24)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "准备下载失败")
+		return
+	}
+	now := s.now()
+	s.cleanupExpiredTickets(now)
+	s.ticketMu.Lock()
+	s.tickets[token] = downloadTicket{fileID: id, sessionHash: sess.TokenHash, expiresAt: now.Add(time.Minute)}
+	s.ticketMu.Unlock()
+
+	downloadPath := fmt.Sprintf("/api/files/%d/download", id)
+	http.SetCookie(w, &http.Cookie{
+		Name:     downloadTicketCookieName + strconv.FormatInt(id, 10),
+		Value:    token,
+		Path:     downloadPath,
+		MaxAge:   int(time.Minute.Seconds()),
+		Secure:   s.cfg.cookieSecure,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"url": downloadPath})
+}
+
+func (s *server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	sess := sessionFromContext(r.Context())
+	ticketToken := ""
+	if ticketCookie, err := r.Cookie(downloadTicketCookieName + strconv.FormatInt(id, 10)); err == nil {
+		ticketToken = ticketCookie.Value
+	}
+	s.clearDownloadTicketCookie(w, id)
+	if !s.consumeTicket(ticketToken, id, sess.TokenHash) {
+		writeError(w, http.StatusForbidden, "下载链接无效或已过期")
+		return
+	}
+	record, err := s.db.getFile(r.Context(), sess.UserID, id, s.now())
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := os.Open(filepath.Join(s.cfg.uploadDir, record.StoredName))
+	if err != nil {
+		s.logger.Error("open uploaded file", "error", err, "file_id", id)
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": record.FileName})
+	w.Header().Set("Content-Type", record.MIMEType)
+	w.Header().Set("Content-Disposition", disposition)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", record.FileSize))
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := io.Copy(w, file); err != nil {
+		s.logger.Warn("download interrupted", "file_id", id, "error", err)
+		return
+	}
+	if err := s.db.addEvent(r.Context(), sess.UserID, "file", id, "download", simplifyUserAgent(r.UserAgent()), s.now()); err != nil {
+		s.logger.Error("record download", "file_id", id, "error", err)
+	}
+}
+
+func (s *server) consumeTicket(token string, fileID int64, sessionHash string) bool {
+	if token == "" {
+		return false
+	}
+	s.ticketMu.Lock()
+	defer s.ticketMu.Unlock()
+	ticket, ok := s.tickets[token]
+	delete(s.tickets, token)
+	return ok && ticket.fileID == fileID && ticket.sessionHash == sessionHash && ticket.expiresAt.After(s.now())
+}
+
+func (s *server) clearDownloadTicketCookie(w http.ResponseWriter, fileID int64) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     downloadTicketCookieName + strconv.FormatInt(fileID, 10),
+		Path:     fmt.Sprintf("/api/files/%d/download", fileID),
+		MaxAge:   -1,
+		Secure:   s.cfg.cookieSecure,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (s *server) cleanupExpiredTickets(now time.Time) {
+	s.ticketMu.Lock()
+	defer s.ticketMu.Unlock()
+	for token, ticket := range s.tickets {
+		if !ticket.expiresAt.After(now) {
+			delete(s.tickets, token)
+		}
+	}
+}
+
+func (s *server) cleanupExpired(ctx context.Context) error {
+	now := s.now()
+	s.cleanupExpiredTickets(now)
+	names, err := s.db.expiredFileNames(ctx, now)
+	if err != nil {
+		return err
+	}
+	if err := s.db.deleteExpired(ctx, now); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := os.Remove(filepath.Join(s.cfg.uploadDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Error("remove expired file", "error", err)
+		}
+	}
+	return nil
+}
+
+func (s *server) cleanupLoop(ctx context.Context) {
+	if err := s.cleanupExpired(ctx); err != nil {
+		s.logger.Error("initial cleanup", "error", err)
+	}
+	ticker := time.NewTicker(s.cfg.cleanupPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.cleanupExpired(ctx); err != nil {
+				s.logger.Error("scheduled cleanup", "error", err)
+			}
+		}
+	}
+}
+
+func (s *server) clientIP(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(value) != nil {
+		return value
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func (s *server) loginAttemptKeys(r *http.Request, username string) (string, string) {
+	ip := s.clientIP(r)
+	return loginIPAttemptPrefix + ip, loginAccountAttemptPrefix + ip + "|" + strings.ToLower(username)
+}
+
+func (s *server) loginDelay(keys ...string) (time.Duration, bool) {
+	s.attemptMu.Lock()
+	defer s.attemptMu.Unlock()
+
+	now := s.now()
+	var maxDelay time.Duration
+	var lockedFor time.Duration
+	for _, key := range keys {
+		attempt := s.attempts[key]
+		if attempt.lockedUntil.After(now) {
+			remaining := attempt.lockedUntil.Sub(now)
+			if remaining > lockedFor {
+				lockedFor = remaining
+			}
+			continue
+		}
+		if attempt.failures <= 1 {
+			continue
+		}
+		delay := time.Duration(attempt.failures-1) * 200 * time.Millisecond
+		if delay > 2*time.Second {
+			delay = 2 * time.Second
+		}
+		if delay > maxDelay {
+			maxDelay = delay
+		}
+	}
+	if lockedFor > 0 {
+		return lockedFor, true
+	}
+	return maxDelay, false
+}
+
+func (s *server) recordLoginFailure(keys ...string) {
+	s.attemptMu.Lock()
+	defer s.attemptMu.Unlock()
+	now := s.now()
+	for _, key := range keys {
+		attempt := s.attempts[key]
+		attempt.failures++
+		if attempt.failures >= 5 {
+			attempt.lockedUntil = now.Add(5 * time.Minute)
+		}
+		s.attempts[key] = attempt
+	}
+}
+
+func (s *server) clearLoginFailures(keys ...string) {
+	s.attemptMu.Lock()
+	for _, key := range keys {
+		delete(s.attempts, key)
+	}
+	s.attemptMu.Unlock()
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, destination any, maxBytes int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return err
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}

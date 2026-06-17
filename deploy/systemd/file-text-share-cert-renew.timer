@@ -1,0 +1,11 @@
+[Unit]
+Description=Check file-text-share TLS certificate twice daily
+
+[Timer]
+OnCalendar=*-*-* 03,15:17:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=file-text-share-cert-renew.service
+
+[Install]
+WantedBy=timers.target
