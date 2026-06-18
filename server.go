@@ -338,6 +338,10 @@ func (s *server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "当前密码错误")
 		return
 	}
+	if subtle.ConstantTimeCompare([]byte(input.CurrentPassword), []byte(input.NewPassword)) == 1 {
+		writeError(w, http.StatusBadRequest, "新密码不能与当前密码相同")
+		return
+	}
 	hash, err := hashPassword(input.NewPassword)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

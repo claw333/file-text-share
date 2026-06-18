@@ -341,6 +341,13 @@ func TestSelfPasswordChangeRevokesSession(t *testing.T) {
 	if wrongCurrent.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong current password status = %d", wrongCurrent.Code)
 	}
+	samePassword := performRequest(app.handler, http.MethodPost, "/api/me/password", strings.NewReader(`{"currentPassword":"Prototype#2026","newPassword":"Prototype#2026"}`), login.Cookie, login.CSRFToken)
+	if samePassword.Code != http.StatusBadRequest {
+		t.Fatalf("same password status = %d, body = %s", samePassword.Code, samePassword.Body.String())
+	}
+	if !strings.Contains(samePassword.Body.String(), "新密码不能与当前密码相同") {
+		t.Fatalf("same password response = %s", samePassword.Body.String())
+	}
 	changed := performRequest(app.handler, http.MethodPost, "/api/me/password", strings.NewReader(`{"currentPassword":"Prototype#2026","newPassword":"UpdatedPassword#2026"}`), login.Cookie, login.CSRFToken)
 	if changed.Code != http.StatusNoContent {
 		t.Fatalf("change password status = %d, body = %s", changed.Code, changed.Body.String())

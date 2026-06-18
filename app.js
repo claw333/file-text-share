@@ -88,7 +88,11 @@
     const stats = document.querySelector("#admin-stats");
     const toast = document.querySelector("#toast");
     const toastMessage = document.querySelector("#toast-message");
+    const deleteModal = document.querySelector("#admin-delete-modal");
+    const deleteTitle = document.querySelector("#admin-delete-title");
+    const deleteDescription = document.querySelector("#admin-delete-description");
     let toastTimer = null;
+    let pendingDeleteUser = null;
 
     function escapeHtml(value) {
       const div = document.createElement("div");
@@ -116,6 +120,21 @@
       toastTimer = window.setTimeout(function () {
         toast.hidden = true;
       }, 2800);
+    }
+
+    function openDeleteUserModal(id, username) {
+      pendingDeleteUser = { id, username };
+      deleteTitle.textContent = `删除用户 ${username}？`;
+      deleteDescription.textContent = "删除后，该用户的文本、文件和会话都会被删除，无法恢复。";
+      deleteModal.hidden = false;
+      document.body.style.overflow = "hidden";
+      deleteModal.querySelector(".modal-cancel").focus();
+    }
+
+    function closeDeleteUserModal() {
+      deleteModal.hidden = true;
+      document.body.style.overflow = "";
+      pendingDeleteUser = null;
     }
 
     function renderUsers(users) {
@@ -208,13 +227,31 @@
         if (deleteButton) {
           const card = deleteButton.closest(".admin-user-card");
           const username = card.querySelector(".admin-user-title strong").textContent;
-          if (!window.confirm(`确定删除用户 ${username}？该用户的文本、文件和会话都会被删除。`)) return;
-          await api(`/api/admin/users/${deleteButton.dataset.userId}`, { method: "DELETE" });
-          await loadUsers();
-          showToast("用户已删除");
+          openDeleteUserModal(deleteButton.dataset.userId, username);
         }
       } catch (error) {
         showToast(error.message);
+      }
+    });
+
+    deleteModal.querySelector(".modal-close").addEventListener("click", closeDeleteUserModal);
+    deleteModal.querySelector(".modal-cancel").addEventListener("click", closeDeleteUserModal);
+    deleteModal.addEventListener("click", function (event) { if (event.target === deleteModal) closeDeleteUserModal(); });
+    document.addEventListener("keydown", function (event) { if (event.key === "Escape" && !deleteModal.hidden) closeDeleteUserModal(); });
+    deleteModal.querySelector(".modal-confirm").addEventListener("click", async function () {
+      if (!pendingDeleteUser) return;
+      const user = pendingDeleteUser;
+      const confirmButton = deleteModal.querySelector(".modal-confirm");
+      confirmButton.disabled = true;
+      try {
+        await api(`/api/admin/users/${user.id}`, { method: "DELETE" });
+        closeDeleteUserModal();
+        await loadUsers();
+        showToast("用户已删除");
+      } catch (error) {
+        showToast(error.message);
+      } finally {
+        confirmButton.disabled = false;
       }
     });
 
@@ -266,6 +303,10 @@
       }
       if (newPassword !== confirmPassword) {
         showToast("两次输入的新密码不一致");
+        return;
+      }
+      if (newPassword === currentPassword) {
+        showToast("新密码不能与当前密码相同");
         return;
       }
       try {

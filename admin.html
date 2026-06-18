@@ -106,6 +106,19 @@
       </div>
     </div>
 
+    <div class="modal-backdrop" id="admin-delete-modal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="admin-delete-title">
+        <button class="icon-button modal-close" type="button" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="m5 5 14 14M19 5 5 19" /></svg></button>
+        <span class="modal-warning"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></span>
+        <h2 id="admin-delete-title">删除这个用户？</h2>
+        <p id="admin-delete-description">删除后，该用户的文本、文件和会话都会被删除，无法恢复。</p>
+        <div class="modal-actions">
+          <button class="button button-ghost modal-cancel" type="button">取消</button>
+          <button class="button button-danger modal-confirm" type="button">确认删除</button>
+        </div>
+      </section>
+    </div>
+
     <script src="app.js?v=backend-1"></script>
   </body>
 </html>
