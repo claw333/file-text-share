@@ -15,10 +15,6 @@
     }
 
     const response = await fetch(path, config);
-    if (response.status === 401 && page !== "login") {
-      window.location.replace("/");
-      throw new Error("登录已失效");
-    }
     if (!response.ok) {
       let message = "请求失败，请稍后重试";
       try {
@@ -29,6 +25,10 @@
       }
       const error = new Error(message);
       error.status = response.status;
+      if (response.status === 401 && page !== "login" && (message === "请先登录" || message === "登录已失效")) {
+        window.location.replace("/");
+        throw new Error("登录已失效");
+      }
       throw error;
     }
     if (response.status === 204) return null;
