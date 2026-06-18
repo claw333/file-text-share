@@ -22,6 +22,7 @@ export PROJECT_DIR=/opt/file-text-share
 - 禁止执行 `docker compose down -v`，除非用户明确要求清空所有数据。
 - 生产入口只允许 HTTPS 443。80 端口只用于 HTTP 到 HTTPS 跳转和 Let's Encrypt HTTP-01 验证。
 - 直接用 IP 或非配置域名访问时，Nginx 应断开 HTTP 连接，并在 HTTPS 阶段拒绝未知 SNI。
+- app 默认不信任代理头；本 Compose 部署位于 Nginx 后方，必须保持 `APP_TRUST_PROXY_HEADERS=true`，否则限速和日志会把所有请求来源识别为 Nginx 容器 IP。
 
 ## 1. 本地准备
 
@@ -254,7 +255,7 @@ ufw status verbose
 
 若服务器 SSH 使用 22 端口，把 `SSH_PORT` 设置为 `22`。不要在没有确认 SSH 端口时启用 UFW。
 
-Docker 会发布 80/443 到宿主机；本项目没有发布 8080，app 只在 Docker 内部网络对 Nginx 可见。
+Docker 会发布 80/443 到宿主机；本项目没有发布 8080，app 只在 Docker 内部网络对 Nginx 可见。`compose.yaml` 已为 app 设置 `APP_TRUST_PROXY_HEADERS=true`，用于采信 Nginx 传入的 `X-Real-IP`；若改成直连部署，应移除或设为 `false`。
 
 ## 9. 验证上线结果
 

@@ -17,11 +17,12 @@ const (
 )
 
 type config struct {
-	addr          string
-	databasePath  string
-	uploadDir     string
-	cookieSecure  bool
-	cleanupPeriod time.Duration
+	addr              string
+	databasePath      string
+	uploadDir         string
+	cookieSecure      bool
+	trustProxyHeaders bool
+	cleanupPeriod     time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -43,6 +44,13 @@ func loadConfig() (config, error) {
 			return config{}, fmt.Errorf("parse APP_COOKIE_SECURE: %w", err)
 		}
 		cfg.cookieSecure = value
+	}
+	if raw := os.Getenv("APP_TRUST_PROXY_HEADERS"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return config{}, fmt.Errorf("parse APP_TRUST_PROXY_HEADERS: %w", err)
+		}
+		cfg.trustProxyHeaders = value
 	}
 
 	return cfg, nil

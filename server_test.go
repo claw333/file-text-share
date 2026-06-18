@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -112,6 +113,25 @@ func performRequest(handler http.Handler, method, path string, body io.Reader, c
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func requestDownloadTicket(t *testing.T, app testApp, fileID int64, cookie *http.Cookie, csrf string) (string, *http.Cookie) {
+	t.Helper()
+	ticketResponse := performRequest(app.handler, http.MethodPost, "/api/files/"+strconv.FormatInt(fileID, 10)+"/download-ticket", nil, cookie, csrf)
+	if ticketResponse.Code != http.StatusOK {
+		t.Fatalf("ticket status = %d, body = %s", ticketResponse.Code, ticketResponse.Body.String())
+	}
+	var ticket struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(ticketResponse.Body.Bytes(), &ticket); err != nil {
+		t.Fatal(err)
+	}
+	ticketCookies := ticketResponse.Result().Cookies()
+	if len(ticketCookies) != 1 || !ticketCookies[0].HttpOnly {
+		t.Fatalf("download ticket cookies = %#v, want one HttpOnly cookie", ticketCookies)
+	}
+	return ticket.URL, ticketCookies[0]
 }
 
 func TestReservedAdminAccountRole(t *testing.T) {
@@ -360,6 +380,28 @@ func TestCleanupExpiredKeepsLockedLoginAttempts(t *testing.T) {
 	}
 }
 
+func TestClientIPIgnoresProxyHeaderByDefault(t *testing.T) {
+	srv := newServer(config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.0.0.1:5000"
+	request.Header.Set("X-Real-IP", "1.2.3.4")
+
+	if got := srv.clientIP(request); got != "10.0.0.1" {
+		t.Fatalf("clientIP = %q, want RemoteAddr host", got)
+	}
+}
+
+func TestClientIPTrustsProxyHeaderWhenConfigured(t *testing.T) {
+	srv := newServer(config{trustProxyHeaders: true}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.0.0.1:5000"
+	request.Header.Set("X-Real-IP", "1.2.3.4")
+
+	if got := srv.clientIP(request); got != "1.2.3.4" {
+		t.Fatalf("clientIP = %q, want X-Real-IP", got)
+	}
+}
+
 func TestPasswordChangeRevokesExistingSession(t *testing.T) {
 	app := newTestApp(t)
 	cookie, _ := app.login(t)
@@ -546,6 +588,9 @@ func TestFileUploadDownloadAndEvent(t *testing.T) {
 	if download.Code != http.StatusOK || download.Body.String() != "hello across devices" {
 		t.Fatalf("download status = %d, body = %q", download.Code, download.Body.String())
 	}
+	if disposition := download.Header().Get("Content-Disposition"); !strings.Contains(disposition, "filename=hello.txt") {
+		t.Fatalf("Content-Disposition = %q, want hello.txt filename", disposition)
+	}
 
 	items, err := app.db.listItems(context.Background(), app.userID, app.server.now())
 	if err != nil {
@@ -553,6 +598,98 @@ func TestFileUploadDownloadAndEvent(t *testing.T) {
 	}
 	if len(items) != 1 || len(items[0].Events) != 1 || items[0].Events[0].EventType != "download" {
 		t.Fatalf("download events = %#v", items)
+	}
+}
+
+func TestFileDownloadRangeSkipsDownloadEvent(t *testing.T) {
+	app := newTestApp(t)
+	cookie, csrf := app.login(t)
+	content := []byte("hello across devices")
+	if err := os.MkdirAll(app.server.cfg.uploadDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	storedName := "range-file"
+	if err := os.WriteFile(filepath.Join(app.server.cfg.uploadDir, storedName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: storedName,
+		FileName:   "range.txt",
+		FileSize:   int64(len(content)),
+		MIMEType:   "text/plain",
+	}, "test device", app.server.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadURL, ticketCookie := requestDownloadTicket(t, app, fileID, cookie, csrf)
+
+	request := httptest.NewRequest(http.MethodGet, downloadURL, nil)
+	request.AddCookie(cookie)
+	request.AddCookie(ticketCookie)
+	request.Header.Set("Range", "bytes=0-3")
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusPartialContent {
+		t.Fatalf("range download status = %d, body = %q", response.Code, response.Body.String())
+	}
+	if response.Body.String() != "hell" {
+		t.Fatalf("range download body = %q, want %q", response.Body.String(), "hell")
+	}
+	if got := response.Header().Get("Content-Range"); got != "bytes 0-3/20" {
+		t.Fatalf("Content-Range = %q, want bytes 0-3/20", got)
+	}
+	if got := response.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("Accept-Ranges = %q, want bytes", got)
+	}
+
+	items, err := app.db.listItems(context.Background(), app.userID, app.server.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || len(items[0].Events) != 0 {
+		t.Fatalf("range download events = %#v, want no download event", items)
+	}
+}
+
+func TestFileDownloadContentDispositionSupportsChineseFilename(t *testing.T) {
+	app := newTestApp(t)
+	cookie, csrf := app.login(t)
+	content := []byte("report")
+	if err := os.MkdirAll(app.server.cfg.uploadDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	storedName := "chinese-file"
+	if err := os.WriteFile(filepath.Join(app.server.cfg.uploadDir, storedName), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileName := "轻递报告.txt"
+	fileID, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: storedName,
+		FileName:   fileName,
+		FileSize:   int64(len(content)),
+		MIMEType:   "text/plain",
+	}, "test device", app.server.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadURL, ticketCookie := requestDownloadTicket(t, app, fileID, cookie, csrf)
+
+	request := httptest.NewRequest(http.MethodGet, downloadURL, nil)
+	request.AddCookie(cookie)
+	request.AddCookie(ticketCookie)
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("download status = %d, body = %q", response.Code, response.Body.String())
+	}
+	disposition := response.Header().Get("Content-Disposition")
+	escapedName := url.PathEscape(fileName)
+	if !strings.Contains(disposition, "filename*=") || !strings.Contains(disposition, escapedName) {
+		t.Fatalf("Content-Disposition = %q, want encoded filename %q", disposition, escapedName)
 	}
 }
 

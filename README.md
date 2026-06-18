@@ -78,6 +78,7 @@ APP_COOKIE_SECURE=false go run . serve
 | `APP_DB_PATH` | 用户缓存目录下的 `file-text-share/share.db` | SQLite 数据库位置 |
 | `APP_UPLOAD_DIR` | 用户缓存目录下的 `file-text-share/uploads` | 上传文件目录 |
 | `APP_COOKIE_SECURE` | `true` | 是否仅通过 HTTPS 发送会话 Cookie |
+| `APP_TRUST_PROXY_HEADERS` | `false` | 是否信任反向代理传入的 `X-Real-IP`；Nginx/反代后部署需设为 `true` |
 | `APP_ADMIN_PASSWORD` | 无 | 管理员命令临时读取的密码，不应写入配置文件 |
 
 ## 测试

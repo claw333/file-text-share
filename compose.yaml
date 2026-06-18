@@ -12,6 +12,7 @@ services:
       APP_DB_PATH: /data/share.db
       APP_UPLOAD_DIR: /data/uploads
       APP_COOKIE_SECURE: "true"
+      APP_TRUST_PROXY_HEADERS: "true"
     expose:
       - "8080"
     volumes:

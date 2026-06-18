@@ -713,18 +713,19 @@ func (s *server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": record.FileName})
+	modTime := time.Time{}
+	if info, err := file.Stat(); err == nil {
+		modTime = info.ModTime()
+	}
 	w.Header().Set("Content-Type", record.MIMEType)
-	w.Header().Set("Content-Disposition", disposition)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", record.FileSize))
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": record.FileName}))
 	w.Header().Set("Cache-Control", "no-store")
-	if _, err := io.Copy(w, file); err != nil {
-		s.logger.Warn("download interrupted", "file_id", id, "error", err)
-		return
+	if r.Header.Get("Range") == "" {
+		if err := s.db.addEvent(r.Context(), sess.UserID, "file", id, "download", simplifyUserAgent(r.UserAgent()), s.now()); err != nil {
+			s.logger.Error("record download", "file_id", id, "error", err)
+		}
 	}
-	if err := s.db.addEvent(r.Context(), sess.UserID, "file", id, "download", simplifyUserAgent(r.UserAgent()), s.now()); err != nil {
-		s.logger.Error("record download", "file_id", id, "error", err)
-	}
+	http.ServeContent(w, r, record.FileName, modTime, file)
 }
 
 func (s *server) consumeTicket(token string, fileID int64, sessionHash string) bool {
@@ -810,8 +811,10 @@ func (s *server) cleanupLoop(ctx context.Context) {
 }
 
 func (s *server) clientIP(r *http.Request) string {
-	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(value) != nil {
-		return value
+	if s.cfg.trustProxyHeaders {
+		if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(value) != nil {
+			return value
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
