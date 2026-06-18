@@ -49,6 +49,12 @@ server {
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
+    # Liveness/DB-health endpoint is for the container healthcheck (in-container,
+    # direct to 8080), not for the public. Don't expose backend health to the edge.
+    location = /healthz {
+        return 404;
+    }
+
     location / {
         proxy_pass http://app:8080;
         proxy_http_version 1.1;
