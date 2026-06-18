@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>轻递 · 个人中心</title>
+    <link rel="stylesheet" href="styles.css?v=backend-1" />
+  </head>
+  <body class="app-body" data-page="profile">
+    <header class="app-header">
+      <div class="page-width header-inner">
+        <a class="brand" id="profile-home-link" href="share.html" aria-label="返回轻递">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 36 36"><path d="M8 11.5h20M8 24.5h20M12 7l-4 4.5 4 4.5M24 20l4 4.5-4 4.5" /></svg>
+          </span>
+          <span>轻递</span>
+        </a>
+
+        <div class="header-actions">
+          <div class="connection-status" title="当前连接安全">
+            <span></span>
+            <span class="status-full">个人中心</span>
+          </div>
+          <button class="icon-button logout-button" id="logout-button" type="button" aria-label="退出登录" title="退出登录">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" /></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-width app-main">
+      <section class="welcome-row">
+        <div>
+          <p class="eyebrow">ACCOUNT</p>
+          <h1>个人中心</h1>
+          <p>管理当前账号信息和登录密码。</p>
+        </div>
+      </section>
+
+      <section class="profile-grid" aria-label="个人中心">
+        <article class="composer-card">
+          <div class="card-heading">
+            <span class="section-icon text-icon" id="profile-avatar">U</span>
+            <div><h2 id="profile-username">用户</h2><p id="profile-role">普通用户</p></div>
+          </div>
+          <p class="profile-note">这是你当前登录的账号。用户名由管理员创建，不能在这里修改。</p>
+        </article>
+
+        <article class="composer-card">
+          <div class="card-heading">
+            <span class="section-icon file-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></svg></span>
+            <div><h2>修改密码</h2><p>修改密码后会登出，并用新密码重新登录。</p></div>
+          </div>
+          <form class="admin-form" id="profile-password-form">
+            <label class="field">
+              <span class="field-label">当前密码</span>
+              <span class="input-wrap">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></svg>
+                <input id="current-password" type="password" autocomplete="current-password" placeholder="请输入当前密码" required />
+              </span>
+            </label>
+            <label class="field">
+              <span class="field-label">新密码</span>
+              <span class="input-wrap">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></svg>
+                <input id="new-password" type="password" autocomplete="new-password" placeholder="12-128 位复杂密码" required />
+              </span>
+            </label>
+            <label class="field">
+              <span class="field-label">确认新密码</span>
+              <span class="input-wrap">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>
+                <input id="confirm-password" type="password" autocomplete="new-password" placeholder="再次输入新密码" required />
+              </span>
+            </label>
+            <button class="button button-primary button-block" type="submit">修改密码并登出</button>
+          </form>
+        </article>
+      </section>
+    </main>
+
+    <footer class="app-footer page-width">
+      <p><span></span>修改密码后，所有已登录设备都会失效</p>
+      <p>轻递 · 个人中心</p>
+    </footer>
+
+    <div class="toast-region" aria-live="polite" aria-atomic="true">
+      <div class="toast" id="toast" hidden>
+        <span class="toast-icon"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg></span>
+        <span id="toast-message">操作成功</span>
+      </div>
+    </div>
+
+    <script src="app.js?v=backend-1"></script>
+  </body>
+</html>

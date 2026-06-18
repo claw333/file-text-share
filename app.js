@@ -15,7 +15,7 @@
     }
 
     const response = await fetch(path, config);
-    if (response.status === 401 && page === "share") {
+    if (response.status === 401 && page !== "login") {
       window.location.replace("/");
       throw new Error("登录已失效");
     }
@@ -67,17 +67,228 @@
       const original = submit.innerHTML;
       submit.textContent = "正在验证…";
       try {
-        await api("/api/login", {
+        const login = await api("/api/login", {
           method: "POST",
           body: JSON.stringify({ username, password: passwordInput.value }),
         });
-        window.location.replace("/share.html");
+        window.location.replace(login.redirectTo || "/share.html");
       } catch (requestError) {
         error.textContent = requestError.message;
         error.hidden = false;
         submit.disabled = false;
         submit.innerHTML = original;
       }
+    });
+    return;
+  }
+
+  if (page === "admin") {
+    const usersContainer = document.querySelector("#admin-users");
+    const createForm = document.querySelector("#admin-create-user-form");
+    const stats = document.querySelector("#admin-stats");
+    const toast = document.querySelector("#toast");
+    const toastMessage = document.querySelector("#toast-message");
+    let toastTimer = null;
+
+    function escapeHtml(value) {
+      const div = document.createElement("div");
+      div.textContent = value;
+      return div.innerHTML;
+    }
+
+    function formatTime(value) {
+      if (!value) return "尚无";
+      return new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).format(new Date(value)).replaceAll("/", "-");
+    }
+
+    function showToast(message) {
+      window.clearTimeout(toastTimer);
+      toastMessage.textContent = message;
+      toast.hidden = false;
+      toastTimer = window.setTimeout(function () {
+        toast.hidden = true;
+      }, 2800);
+    }
+
+    function renderUsers(users) {
+      const totalTexts = users.reduce(function (sum, user) { return sum + user.textCount; }, 0);
+      const totalFiles = users.reduce(function (sum, user) { return sum + user.fileCount; }, 0);
+      stats.innerHTML = `<span><strong>${users.length}</strong><small>用户</small></span><span><strong>${totalTexts}</strong><small>文本</small></span><span><strong>${totalFiles}</strong><small>文件</small></span>`;
+      usersContainer.innerHTML = users.map(function (user) {
+        const isAdmin = user.role === "admin";
+        const roleLabel = isAdmin ? "管理员" : "普通用户";
+        const actions = isAdmin
+          ? '<span class="admin-muted">保留账号</span>'
+          : `<label class="admin-password-reset"><span class="sr-only">新密码</span><input type="password" autocomplete="new-password" placeholder="新密码" data-password-for="${user.id}" /><button class="button button-soft admin-reset-password" type="button" data-user-id="${user.id}">改密</button></label><button class="icon-button action-delete admin-delete-user" type="button" data-user-id="${user.id}" aria-label="删除用户" title="删除用户"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>`;
+        return `<article class="admin-user-card" data-user-id="${user.id}">
+          <div class="admin-user-main">
+            <span class="avatar">${escapeHtml(user.username.slice(0, 1).toUpperCase())}</span>
+            <div>
+              <div class="admin-user-title"><strong>${escapeHtml(user.username)}</strong><span class="status-chip ${isAdmin ? "status-used" : "status-new"}"><span></span>${roleLabel}</span></div>
+              <dl class="admin-user-meta">
+                <div><dt>创建</dt><dd>${formatTime(user.createdAt)}</dd></div>
+                <div><dt>最近登录</dt><dd>${formatTime(user.lastLoginAt)}</dd></div>
+                <div><dt>最近上传</dt><dd>${formatTime(user.lastUploadAt)}</dd></div>
+                <div><dt>内容</dt><dd>${user.textCount} 文本 / ${user.fileCount} 文件</dd></div>
+                <div><dt>登录次数</dt><dd>${user.loginCount}</dd></div>
+              </dl>
+            </div>
+          </div>
+          <div class="admin-user-actions">${actions}</div>
+        </article>`;
+      }).join("");
+    }
+
+    async function loadUsers() {
+      const payload = await api("/api/admin/users", { method: "GET" });
+      renderUsers(payload.users || []);
+    }
+
+    async function initializeAdmin() {
+      try {
+        const session = await api("/api/session", { method: "GET" });
+        if (session.role !== "admin") {
+          window.location.replace(session.redirectTo || "/share.html");
+          return;
+        }
+        csrfToken = session.csrfToken;
+        document.querySelector("#account-name").textContent = session.username;
+        document.querySelector("#account-avatar").textContent = session.username.slice(0, 1).toUpperCase();
+        await loadUsers();
+      } catch (error) {
+        if (error.message !== "登录已失效") {
+          usersContainer.innerHTML = `<div class="list-error">${escapeHtml(error.message)} <button type="button" id="retry-load">重新加载</button></div>`;
+          document.querySelector("#retry-load").addEventListener("click", initializeAdmin);
+        }
+      }
+    }
+
+    createForm.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      const username = document.querySelector("#admin-new-username").value.trim();
+      const password = document.querySelector("#admin-new-password").value;
+      if (!username || !password) {
+        showToast("请填写用户名和初始密码");
+        return;
+      }
+      try {
+        await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password }) });
+        createForm.reset();
+        await loadUsers();
+        showToast("用户已创建");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+
+    usersContainer.addEventListener("click", async function (event) {
+      const resetButton = event.target.closest(".admin-reset-password");
+      const deleteButton = event.target.closest(".admin-delete-user");
+      try {
+        if (resetButton) {
+          const id = resetButton.dataset.userId;
+          const input = usersContainer.querySelector(`[data-password-for="${id}"]`);
+          if (!input.value) {
+            showToast("请输入新密码");
+            return;
+          }
+          await api(`/api/admin/users/${id}/password`, { method: "POST", body: JSON.stringify({ password: input.value }) });
+          input.value = "";
+          await loadUsers();
+          showToast("密码已修改，该用户需重新登录");
+        }
+        if (deleteButton) {
+          const card = deleteButton.closest(".admin-user-card");
+          const username = card.querySelector(".admin-user-title strong").textContent;
+          if (!window.confirm(`确定删除用户 ${username}？该用户的文本、文件和会话都会被删除。`)) return;
+          await api(`/api/admin/users/${deleteButton.dataset.userId}`, { method: "DELETE" });
+          await loadUsers();
+          showToast("用户已删除");
+        }
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+
+    document.querySelector("#admin-refresh-users").addEventListener("click", loadUsers);
+    document.querySelector("#logout-button").addEventListener("click", async function () {
+      try {
+        await api("/api/logout", { method: "POST" });
+      } finally {
+        window.location.replace("/");
+      }
+    });
+
+    initializeAdmin();
+    return;
+  }
+
+  if (page === "profile") {
+    const form = document.querySelector("#profile-password-form");
+    const toast = document.querySelector("#toast");
+    const toastMessage = document.querySelector("#toast-message");
+    let toastTimer = null;
+
+    function showToast(message) {
+      window.clearTimeout(toastTimer);
+      toastMessage.textContent = message;
+      toast.hidden = false;
+      toastTimer = window.setTimeout(function () {
+        toast.hidden = true;
+      }, 2800);
+    }
+
+    async function initializeProfile() {
+      const session = await api("/api/session", { method: "GET" });
+      csrfToken = session.csrfToken;
+      document.querySelector("#profile-username").textContent = session.username;
+      document.querySelector("#profile-avatar").textContent = session.username.slice(0, 1).toUpperCase();
+      document.querySelector("#profile-role").textContent = session.role === "admin" ? "管理员" : "普通用户";
+      document.querySelector("#profile-home-link").setAttribute("href", session.redirectTo || "/share.html");
+    }
+
+    form.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      const currentPassword = document.querySelector("#current-password").value;
+      const newPassword = document.querySelector("#new-password").value;
+      const confirmPassword = document.querySelector("#confirm-password").value;
+      if (!currentPassword || !newPassword || !confirmPassword) {
+        showToast("请填写完整密码信息");
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        showToast("两次输入的新密码不一致");
+        return;
+      }
+      try {
+        await api("/api/me/password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) });
+        showToast("密码已修改，请用新密码重新登录");
+        window.setTimeout(function () {
+          window.location.replace("/");
+        }, 900);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+
+    document.querySelector("#logout-button").addEventListener("click", async function () {
+      try {
+        await api("/api/logout", { method: "POST" });
+      } finally {
+        window.location.replace("/");
+      }
+    });
+
+    initializeProfile().catch(function (error) {
+      if (error.message !== "登录已失效") showToast(error.message);
     });
     return;
   }

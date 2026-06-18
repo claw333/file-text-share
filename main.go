@@ -35,7 +35,7 @@ func run() error {
 		return runUserCommand(store, os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] != "serve" {
-		return fmt.Errorf("未知命令 %q；可用命令：serve、user set-password <username>", os.Args[1])
+		return fmt.Errorf("未知命令 %q；可用命令：serve、user set-password <username>、user set-admin-password", os.Args[1])
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -74,12 +74,22 @@ func run() error {
 }
 
 func runUserCommand(store *database, args []string) error {
-	if len(args) != 2 || args[0] != "set-password" {
-		return errors.New("用法：APP_ADMIN_PASSWORD='...' go run . user set-password <username>")
+	if len(args) == 1 && args[0] == "set-admin-password" {
+		return setAccountPassword(store, adminUsername, roleAdmin)
 	}
-	username := strings.TrimSpace(args[1])
+	if len(args) == 2 && args[0] == "set-password" {
+		return setAccountPassword(store, args[1], roleUser)
+	}
+	return errors.New("用法：APP_ADMIN_PASSWORD='...' go run . user set-password <username>；或 APP_ADMIN_PASSWORD='...' go run . user set-admin-password")
+}
+
+func setAccountPassword(store *database, username, role string) error {
+	username = strings.TrimSpace(username)
 	if username == "" || len(username) > 64 {
 		return errors.New("用户名不能为空且不能超过 64 个字符")
+	}
+	if role == roleUser && isReservedAdminUsername(username) {
+		return errReservedAdminUsername
 	}
 	password := os.Getenv("APP_ADMIN_PASSWORD")
 	if password == "" {
@@ -89,8 +99,14 @@ func runUserCommand(store *database, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := store.setUserPassword(context.Background(), username, hash, time.Now().UTC()); err != nil {
-		return fmt.Errorf("保存账号: %w", err)
+	var saveErr error
+	if role == roleAdmin {
+		saveErr = store.setAdminPassword(context.Background(), hash, time.Now().UTC())
+	} else {
+		saveErr = store.setUserPassword(context.Background(), username, hash, time.Now().UTC())
+	}
+	if saveErr != nil {
+		return fmt.Errorf("保存账号: %w", saveErr)
 	}
 	fmt.Printf("账号 %q 已创建或更新。\n", username)
 	return nil

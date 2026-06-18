@@ -22,7 +22,27 @@ const (
 	argonParallelism = 2
 	argonSaltLength  = 16
 	argonKeyLength   = 32
+	roleUser         = "user"
+	roleAdmin        = "admin"
+	adminUsername    = "admin"
 )
+
+var errReservedAdminUsername = errors.New("admin 是保留管理员账号名")
+
+func isReservedAdminUsername(username string) bool {
+	return strings.EqualFold(strings.TrimSpace(username), adminUsername)
+}
+
+func validateRegularUsername(username string) error {
+	username = strings.TrimSpace(username)
+	if username == "" || utf8.RuneCountInString(username) > 64 {
+		return errors.New("用户名不能为空且不能超过 64 个字符")
+	}
+	if isReservedAdminUsername(username) {
+		return errReservedAdminUsername
+	}
+	return nil
+}
 
 func validatePassword(password string) error {
 	length := utf8.RuneCountInString(password)

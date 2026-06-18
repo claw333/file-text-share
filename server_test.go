@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -22,6 +23,13 @@ type testApp struct {
 	handler http.Handler
 	db      *database
 	userID  int64
+}
+
+type loginResult struct {
+	Cookie     *http.Cookie
+	CSRFToken  string
+	Role       string
+	RedirectTo string
 }
 
 func newTestApp(t *testing.T) testApp {
@@ -57,7 +65,17 @@ func newTestApp(t *testing.T) testApp {
 
 func (app testApp) login(t *testing.T) (*http.Cookie, string) {
 	t.Helper()
-	body := strings.NewReader(`{"username":"demo","password":"Prototype#2026"}`)
+	result := app.loginAs(t, "demo", "Prototype#2026")
+	return result.Cookie, result.CSRFToken
+}
+
+func (app testApp) loginAs(t *testing.T, username, password string) loginResult {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{"username": username, "password": password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.NewReader(payload)
 	request := httptest.NewRequest(http.MethodPost, "/api/login", body)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -66,7 +84,9 @@ func (app testApp) login(t *testing.T) (*http.Cookie, string) {
 		t.Fatalf("login status = %d, body = %s", response.Code, response.Body.String())
 	}
 	result := struct {
-		CSRFToken string `json:"csrfToken"`
+		CSRFToken  string `json:"csrfToken"`
+		Role       string `json:"role"`
+		RedirectTo string `json:"redirectTo"`
 	}{}
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
@@ -75,7 +95,7 @@ func (app testApp) login(t *testing.T) (*http.Cookie, string) {
 	if len(cookies) != 1 {
 		t.Fatalf("login cookies = %d, want 1", len(cookies))
 	}
-	return cookies[0], result.CSRFToken
+	return loginResult{Cookie: cookies[0], CSRFToken: result.CSRFToken, Role: result.Role, RedirectTo: result.RedirectTo}
 }
 
 func performRequest(handler http.Handler, method, path string, body io.Reader, cookie *http.Cookie, csrf string) *httptest.ResponseRecorder {
@@ -92,6 +112,171 @@ func performRequest(handler http.Handler, method, path string, body io.Reader, c
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func TestReservedAdminAccountRole(t *testing.T) {
+	directory := t.TempDir()
+	db, err := openDatabase(filepath.Join(directory, "share.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.close() })
+
+	hash, err := hashPassword("Prototype#2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	if err := db.setUserPassword(context.Background(), "admin", hash, now); !errors.Is(err, errReservedAdminUsername) {
+		t.Fatalf("set regular admin error = %v, want %v", err, errReservedAdminUsername)
+	}
+	if err := db.setAdminPassword(context.Background(), hash, now); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.findUser(context.Background(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.Role != roleAdmin {
+		t.Fatalf("admin role = %q, want %q", admin.Role, roleAdmin)
+	}
+
+	if err := db.setUserPassword(context.Background(), "demo", hash, now); err != nil {
+		t.Fatal(err)
+	}
+	demo, err := db.findUser(context.Background(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demo.Role != roleUser {
+		t.Fatalf("demo role = %q, want %q", demo.Role, roleUser)
+	}
+
+	if err := db.createSession(context.Background(), "admin-session", admin.ID, "csrf", "test device", "127.0.0.1", now); err != nil {
+		t.Fatal(err)
+	}
+	session, err := db.getSession(context.Background(), "admin-session", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Role != roleAdmin {
+		t.Fatalf("session role = %q, want %q", session.Role, roleAdmin)
+	}
+}
+
+func TestUserCommandReservesAdminName(t *testing.T) {
+	directory := t.TempDir()
+	db, err := openDatabase(filepath.Join(directory, "share.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.close() })
+	t.Setenv("APP_ADMIN_PASSWORD", "Prototype#2026")
+
+	if err := runUserCommand(db, []string{"set-password", "admin"}); !errors.Is(err, errReservedAdminUsername) {
+		t.Fatalf("regular admin command error = %v, want %v", err, errReservedAdminUsername)
+	}
+	if err := runUserCommand(db, []string{"set-admin-password"}); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.findUser(context.Background(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.Role != roleAdmin {
+		t.Fatalf("admin role = %q, want %q", admin.Role, roleAdmin)
+	}
+}
+
+func TestAdminUserManagement(t *testing.T) {
+	app := newTestApp(t)
+	adminHash, err := hashPassword("AdminPassword#2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.setAdminPassword(context.Background(), adminHash, app.server.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	adminLogin := app.loginAs(t, "admin", "AdminPassword#2026")
+	if adminLogin.Role != roleAdmin || adminLogin.RedirectTo != "/admin.html" {
+		t.Fatalf("admin login role=%q redirect=%q", adminLogin.Role, adminLogin.RedirectTo)
+	}
+	adminPage := performRequest(app.handler, http.MethodGet, "/admin.html", nil, adminLogin.Cookie, "")
+	if adminPage.Code != http.StatusOK {
+		t.Fatalf("admin page status = %d", adminPage.Code)
+	}
+	adminShare := performRequest(app.handler, http.MethodGet, "/share.html", nil, adminLogin.Cookie, "")
+	if adminShare.Code != http.StatusSeeOther || adminShare.Header().Get("Location") != "/admin.html" {
+		t.Fatalf("admin share redirect = %d %q", adminShare.Code, adminShare.Header().Get("Location"))
+	}
+
+	userLogin := app.loginAs(t, "demo", "Prototype#2026")
+	userAdminAPI := performRequest(app.handler, http.MethodGet, "/api/admin/users", nil, userLogin.Cookie, "")
+	if userAdminAPI.Code != http.StatusForbidden {
+		t.Fatalf("user admin API status = %d", userAdminAPI.Code)
+	}
+
+	createReserved := performRequest(app.handler, http.MethodPost, "/api/admin/users", strings.NewReader(`{"username":"admin","password":"AnotherPassword#2026"}`), adminLogin.Cookie, adminLogin.CSRFToken)
+	if createReserved.Code != http.StatusBadRequest {
+		t.Fatalf("create reserved status = %d", createReserved.Code)
+	}
+	create := performRequest(app.handler, http.MethodPost, "/api/admin/users", strings.NewReader(`{"username":"alice","password":"AlicePassword#2026"}`), adminLogin.Cookie, adminLogin.CSRFToken)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create user status = %d, body = %s", create.Code, create.Body.String())
+	}
+	aliceLogin := app.loginAs(t, "alice", "AlicePassword#2026")
+	createText := performRequest(app.handler, http.MethodPost, "/api/texts", strings.NewReader(`{"text":"hello from alice"}`), aliceLogin.Cookie, aliceLogin.CSRFToken)
+	if createText.Code != http.StatusCreated {
+		t.Fatalf("alice create text status = %d, body = %s", createText.Code, createText.Body.String())
+	}
+
+	list := performRequest(app.handler, http.MethodGet, "/api/admin/users", nil, adminLogin.Cookie, "")
+	if list.Code != http.StatusOK {
+		t.Fatalf("admin list status = %d, body = %s", list.Code, list.Body.String())
+	}
+	var listed struct {
+		Users []adminUserRecord `json:"users"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	var alice adminUserRecord
+	for _, user := range listed.Users {
+		if user.Username == "alice" {
+			alice = user
+			break
+		}
+	}
+	if alice.ID == 0 || alice.Role != roleUser || alice.LastLoginAt == nil || alice.LastUploadAt == nil || alice.TextCount != 1 {
+		t.Fatalf("alice admin record = %#v", alice)
+	}
+
+	reset := performRequest(app.handler, http.MethodPost, "/api/admin/users/"+strconv.FormatInt(alice.ID, 10)+"/password", strings.NewReader(`{"password":"AliceNewPassword#2026"}`), adminLogin.Cookie, adminLogin.CSRFToken)
+	if reset.Code != http.StatusNoContent {
+		t.Fatalf("reset password status = %d, body = %s", reset.Code, reset.Body.String())
+	}
+	oldLogin := performRequest(app.handler, http.MethodPost, "/api/login", strings.NewReader(`{"username":"alice","password":"AlicePassword#2026"}`), nil, "")
+	if oldLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("old alice login status = %d", oldLogin.Code)
+	}
+	newLogin := performRequest(app.handler, http.MethodPost, "/api/login", strings.NewReader(`{"username":"alice","password":"AliceNewPassword#2026"}`), nil, "")
+	if newLogin.Code != http.StatusOK {
+		t.Fatalf("new alice login status = %d, body = %s", newLogin.Code, newLogin.Body.String())
+	}
+
+	deleteAdmin := performRequest(app.handler, http.MethodDelete, "/api/admin/users/999999", nil, adminLogin.Cookie, adminLogin.CSRFToken)
+	if deleteAdmin.Code != http.StatusNotFound {
+		t.Fatalf("delete missing user status = %d", deleteAdmin.Code)
+	}
+	deleted := performRequest(app.handler, http.MethodDelete, "/api/admin/users/"+strconv.FormatInt(alice.ID, 10), nil, adminLogin.Cookie, adminLogin.CSRFToken)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete alice status = %d, body = %s", deleted.Code, deleted.Body.String())
+	}
+	afterDelete := performRequest(app.handler, http.MethodPost, "/api/login", strings.NewReader(`{"username":"alice","password":"AliceNewPassword#2026"}`), nil, "")
+	if afterDelete.Code != http.StatusUnauthorized {
+		t.Fatalf("deleted alice login status = %d", afterDelete.Code)
+	}
 }
 
 func TestLoginRateLimitBlocksRotatingUsernamesFromSameIP(t *testing.T) {
@@ -141,6 +326,39 @@ func TestPasswordChangeRevokesExistingSession(t *testing.T) {
 	login := performRequest(app.handler, http.MethodPost, "/api/login", body, nil, "")
 	if login.Code != http.StatusOK {
 		t.Fatalf("login with updated password status = %d, body = %s", login.Code, login.Body.String())
+	}
+}
+
+func TestSelfPasswordChangeRevokesSession(t *testing.T) {
+	app := newTestApp(t)
+	login := app.loginAs(t, "demo", "Prototype#2026")
+
+	profilePage := performRequest(app.handler, http.MethodGet, "/profile.html", nil, login.Cookie, "")
+	if profilePage.Code != http.StatusOK {
+		t.Fatalf("profile page status = %d", profilePage.Code)
+	}
+	wrongCurrent := performRequest(app.handler, http.MethodPost, "/api/me/password", strings.NewReader(`{"currentPassword":"WrongPassword#2026","newPassword":"UpdatedPassword#2026"}`), login.Cookie, login.CSRFToken)
+	if wrongCurrent.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong current password status = %d", wrongCurrent.Code)
+	}
+	changed := performRequest(app.handler, http.MethodPost, "/api/me/password", strings.NewReader(`{"currentPassword":"Prototype#2026","newPassword":"UpdatedPassword#2026"}`), login.Cookie, login.CSRFToken)
+	if changed.Code != http.StatusNoContent {
+		t.Fatalf("change password status = %d, body = %s", changed.Code, changed.Body.String())
+	}
+	if len(changed.Result().Cookies()) != 1 || changed.Result().Cookies()[0].MaxAge != -1 {
+		t.Fatalf("change password cookies = %#v", changed.Result().Cookies())
+	}
+	sessionAfterChange := performRequest(app.handler, http.MethodGet, "/api/session", nil, login.Cookie, "")
+	if sessionAfterChange.Code != http.StatusUnauthorized {
+		t.Fatalf("session after self password change status = %d", sessionAfterChange.Code)
+	}
+	oldLogin := performRequest(app.handler, http.MethodPost, "/api/login", strings.NewReader(`{"username":"demo","password":"Prototype#2026"}`), nil, "")
+	if oldLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("old password login status = %d", oldLogin.Code)
+	}
+	newLogin := performRequest(app.handler, http.MethodPost, "/api/login", strings.NewReader(`{"username":"demo","password":"UpdatedPassword#2026"}`), nil, "")
+	if newLogin.Code != http.StatusOK {
+		t.Fatalf("new password login status = %d, body = %s", newLogin.Code, newLogin.Body.String())
 	}
 }
 

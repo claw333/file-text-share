@@ -22,7 +22,7 @@ import (
 	"unicode/utf8"
 )
 
-//go:embed index.html share.html styles.css app.js
+//go:embed index.html share.html admin.html profile.html styles.css app.js
 var staticFiles embed.FS
 
 const (
@@ -71,11 +71,18 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /index.html", s.handleIndex)
 	mux.HandleFunc("GET /share.html", s.handleSharePage)
+	mux.HandleFunc("GET /admin.html", s.handleAdminPage)
+	mux.HandleFunc("GET /profile.html", s.handleProfilePage)
 	mux.HandleFunc("GET /styles.css", s.serveStatic("styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /app.js", s.serveStatic("app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("GET /api/session", s.withSession(s.handleSession))
 	mux.HandleFunc("POST /api/logout", s.withSession(s.withCSRF(s.handleLogout)))
+	mux.HandleFunc("POST /api/me/password", s.withSession(s.withCSRF(s.handleChangeOwnPassword)))
+	mux.HandleFunc("GET /api/admin/users", s.withAdmin(s.handleAdminUsers))
+	mux.HandleFunc("POST /api/admin/users", s.withAdmin(s.withCSRF(s.handleAdminCreateUser)))
+	mux.HandleFunc("POST /api/admin/users/{id}/password", s.withAdmin(s.withCSRF(s.handleAdminSetUserPassword)))
+	mux.HandleFunc("DELETE /api/admin/users/{id}", s.withAdmin(s.withCSRF(s.handleAdminDeleteUser)))
 	mux.HandleFunc("GET /api/items", s.withSession(s.handleItems))
 	mux.HandleFunc("POST /api/texts", s.withSession(s.withCSRF(s.handleCreateText)))
 	mux.HandleFunc("POST /api/texts/{id}/copy", s.withSession(s.withCSRF(s.handleCopyText)))
@@ -97,6 +104,13 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+func redirectForRole(role string) string {
+	if role == roleAdmin {
+		return "/admin.html"
+	}
+	return "/share.html"
 }
 
 type contextKey string
@@ -128,6 +142,16 @@ func (s *server) withCSRF(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func (s *server) withAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.withSession(func(w http.ResponseWriter, r *http.Request) {
+		if sessionFromContext(r.Context()).Role != roleAdmin {
+			writeError(w, http.StatusForbidden, "需要管理员权限")
+			return
+		}
+		next(w, r)
+	})
 }
 
 func (s *server) readSession(r *http.Request) (session, error) {
@@ -169,19 +193,45 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if _, err := s.readSession(r); err == nil {
-		http.Redirect(w, r, "/share.html", http.StatusSeeOther)
+	if sess, err := s.readSession(r); err == nil {
+		http.Redirect(w, r, redirectForRole(sess.Role), http.StatusSeeOther)
 		return
 	}
 	s.serveStatic("index.html", "text/html; charset=utf-8")(w, r)
 }
 
 func (s *server) handleSharePage(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.readSession(r)
+	if err != nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if sess.Role == roleAdmin {
+		http.Redirect(w, r, "/admin.html", http.StatusSeeOther)
+		return
+	}
+	s.serveStatic("share.html", "text/html; charset=utf-8")(w, r)
+}
+
+func (s *server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.readSession(r)
+	if err != nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if sess.Role != roleAdmin {
+		http.Redirect(w, r, "/share.html", http.StatusSeeOther)
+		return
+	}
+	s.serveStatic("admin.html", "text/html; charset=utf-8")(w, r)
+}
+
+func (s *server) handleProfilePage(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.readSession(r); err != nil {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	s.serveStatic("share.html", "text/html; charset=utf-8")(w, r)
+	s.serveStatic("profile.html", "text/html; charset=utf-8")(w, r)
 }
 
 func (s *server) serveStatic(name, contentType string) http.HandlerFunc {
@@ -253,18 +303,50 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"username": account.Username, "csrfToken": csrf})
+	writeJSON(w, http.StatusOK, map[string]any{"username": account.Username, "role": account.Role, "csrfToken": csrf, "redirectTo": redirectForRole(account.Role)})
 }
 
 func (s *server) handleSession(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"username": sess.Username, "csrfToken": sess.CSRFToken})
+	writeJSON(w, http.StatusOK, map[string]any{"username": sess.Username, "role": sess.Role, "csrfToken": sess.CSRFToken, "redirectTo": redirectForRole(sess.Role)})
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
 	if err := s.db.deleteSession(r.Context(), sess.TokenHash); err != nil {
 		s.logger.Error("delete session", "error", err)
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, Secure: s.cfg.cookieSecure, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil {
+		return
+	}
+	sess := sessionFromContext(r.Context())
+	account, err := s.db.findUserByID(r.Context(), sess.UserID)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "登录已失效")
+		return
+	}
+	if !verifyPassword(account.PasswordHash, input.CurrentPassword) {
+		writeError(w, http.StatusUnauthorized, "当前密码错误")
+		return
+	}
+	hash, err := hashPassword(input.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.db.setUserPasswordByID(r.Context(), sess.UserID, hash, s.now()); err != nil {
+		s.logger.Error("change own password", "error", err)
+		writeError(w, http.StatusInternalServerError, "修改密码失败")
+		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, Secure: s.cfg.cookieSecure, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	w.WriteHeader(http.StatusNoContent)
@@ -279,6 +361,112 @@ func (s *server) handleItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.db.listAdminUsers(r.Context(), s.now())
+	if err != nil {
+		s.logger.Error("list admin users", "error", err)
+		writeError(w, http.StatusInternalServerError, "读取用户列表失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+}
+
+func (s *server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil {
+		return
+	}
+	input.Username = strings.TrimSpace(input.Username)
+	if err := validateRegularUsername(input.Username); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	hash, err := hashPassword(input.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.db.setUserPassword(r.Context(), input.Username, hash, s.now()); err != nil {
+		s.logger.Error("admin create user", "error", err)
+		writeError(w, http.StatusInternalServerError, "保存用户失败")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "created"})
+}
+
+func (s *server) handleAdminSetUserPassword(w http.ResponseWriter, r *http.Request) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无效的用户编号")
+		return
+	}
+	target, err := s.db.findUserByID(r.Context(), id)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "读取用户失败")
+		return
+	}
+	if target.Role == roleAdmin {
+		writeError(w, http.StatusBadRequest, "管理员密码请在个人中心修改")
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil {
+		return
+	}
+	hash, err := hashPassword(input.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.db.setUserPasswordByID(r.Context(), id, hash, s.now()); err != nil {
+		s.logger.Error("admin set user password", "error", err)
+		writeError(w, http.StatusInternalServerError, "修改密码失败")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无效的用户编号")
+		return
+	}
+	if id == sessionFromContext(r.Context()).UserID {
+		writeError(w, http.StatusBadRequest, "不能删除当前登录的管理员账号")
+		return
+	}
+	storedNames, err := s.db.deleteUser(r.Context(), id)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		if errors.Is(err, errReservedAdminUsername) {
+			writeError(w, http.StatusBadRequest, "不能删除管理员账号")
+			return
+		}
+		s.logger.Error("admin delete user", "error", err)
+		writeError(w, http.StatusInternalServerError, "删除用户失败")
+		return
+	}
+	for _, storedName := range storedNames {
+		if err := os.Remove(filepath.Join(s.cfg.uploadDir, storedName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Error("remove user file", "error", err)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) handleCreateText(w http.ResponseWriter, r *http.Request) {

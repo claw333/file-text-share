@@ -10,7 +10,6 @@ export SSH_PORT=22
 export PUBLIC_HOST=share.example.com
 export SERVER_IP=<SERVER_IP>
 export PROJECT_DIR=/opt/file-text-share
-export ADMIN_USER=share-admin
 ```
 
 如果部署到其他服务器或域名，把下文变量替换成实际值。
@@ -141,9 +140,9 @@ chmod 600 .env
 "
 ```
 
-## 5. 创建或修改登录账号
+## 5. 创建或修改管理员账号
 
-本项目是单账号登录，无注册页面。先构建 app 镜像，再设置账号密码。
+本项目支持 `admin` 管理员账号和多个普通用户，无注册页面。先构建 app 镜像，再设置固定管理员账号 `admin` 的密码。
 
 ```bash
 ssh -t "$SSH_TARGET" "cd '$PROJECT_DIR'
@@ -154,7 +153,7 @@ read APP_ADMIN_PASSWORD
 stty echo
 printf '\n'
 export APP_ADMIN_PASSWORD
-docker compose run --rm --no-deps -e APP_ADMIN_PASSWORD app user set-password '$ADMIN_USER'
+docker compose run --rm --no-deps -e APP_ADMIN_PASSWORD app user set-admin-password
 unset APP_ADMIN_PASSWORD
 "
 ```
@@ -165,7 +164,22 @@ unset APP_ADMIN_PASSWORD
 - 必须包含大写字母、小写字母、数字和特殊字符。
 - 使用 Argon2id 存储哈希。
 
-如果用户要求换用户名，把 `$ADMIN_USER` 设置成目标用户名。
+普通用户建议登录管理员后台创建，也可用服务器命令创建：
+
+```bash
+ssh -t "$SSH_TARGET" "cd '$PROJECT_DIR'
+printf 'APP_ADMIN_PASSWORD: '
+stty -echo
+read APP_ADMIN_PASSWORD
+stty echo
+printf '\n'
+export APP_ADMIN_PASSWORD
+docker compose run --rm --no-deps -e APP_ADMIN_PASSWORD app user set-password '<USERNAME>'
+unset APP_ADMIN_PASSWORD
+"
+```
+
+`admin` 是保留用户名，普通用户不能使用。
 
 ## 6. 首次签发 HTTPS 证书并上线
 
@@ -417,7 +431,7 @@ docker compose exec -T app wget -q -O - http://127.0.0.1:8080/healthz || true
 
 ### 登录失败
 
-重设账号密码：
+重设管理员密码：
 
 ```bash
 ssh -t "$SSH_TARGET" "cd '$PROJECT_DIR'
@@ -427,10 +441,12 @@ read APP_ADMIN_PASSWORD
 stty echo
 printf '\n'
 export APP_ADMIN_PASSWORD
-docker compose run --rm --no-deps -e APP_ADMIN_PASSWORD app user set-password '$ADMIN_USER'
+docker compose run --rm --no-deps -e APP_ADMIN_PASSWORD app user set-admin-password
 unset APP_ADMIN_PASSWORD
 "
 ```
+
+如果要重设普通用户密码，可在管理员后台操作，也可用 `app user set-password '<USERNAME>'`。
 
 不要把密码写进 `.env`。
 

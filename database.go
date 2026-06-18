@@ -19,6 +19,7 @@ type database struct {
 type user struct {
 	ID           int64
 	Username     string
+	Role         string
 	PasswordHash string
 }
 
@@ -26,6 +27,7 @@ type session struct {
 	TokenHash string
 	UserID    int64
 	Username  string
+	Role      string
 	CSRFToken string
 	ExpiresAt time.Time
 }
@@ -57,6 +59,19 @@ type fileRecord struct {
 	FileName   string
 	FileSize   int64
 	MIMEType   string
+}
+
+type adminUserRecord struct {
+	ID           int64      `json:"id"`
+	Username     string     `json:"username"`
+	Role         string     `json:"role"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
+	LastLoginAt  *time.Time `json:"lastLoginAt"`
+	LastUploadAt *time.Time `json:"lastUploadAt"`
+	TextCount    int64      `json:"textCount"`
+	FileCount    int64      `json:"fileCount"`
+	LoginCount   int64      `json:"loginCount"`
 }
 
 func openDatabase(path string) (*database, error) {
@@ -92,6 +107,7 @@ func (d *database) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE,
+			role TEXT NOT NULL DEFAULT 'user',
 			password_hash TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
@@ -106,6 +122,14 @@ func (d *database) migrate(ctx context.Context) error {
 			expires_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS login_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			device_label TEXT NOT NULL,
+			ip_address TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS login_events_user_created_idx ON login_events(user_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS texts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -145,10 +169,54 @@ func (d *database) migrate(ctx context.Context) error {
 			return fmt.Errorf("run database migration: %w", err)
 		}
 	}
+	if err := d.ensureColumn(ctx, "users", "role", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
+		return err
+	}
+	if _, err := d.db.ExecContext(ctx, `UPDATE users SET role = ? WHERE lower(username) = ?`, roleAdmin, adminUsername); err != nil {
+		return fmt.Errorf("reserve admin role: %w", err)
+	}
+	return nil
+}
+
+func (d *database) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := d.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan %s columns: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan %s columns: %w", table, err)
+	}
+	if _, err := d.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s column: %w", table, column, err)
+	}
 	return nil
 }
 
 func (d *database) setUserPassword(ctx context.Context, username, passwordHash string, now time.Time) error {
+	if isReservedAdminUsername(username) {
+		return errReservedAdminUsername
+	}
+	return d.setUserPasswordWithRole(ctx, username, passwordHash, roleUser, now)
+}
+
+func (d *database) setAdminPassword(ctx context.Context, passwordHash string, now time.Time) error {
+	return d.setUserPasswordWithRole(ctx, adminUsername, passwordHash, roleAdmin, now)
+}
+
+func (d *database) setUserPasswordWithRole(ctx context.Context, username, passwordHash, role string, now time.Time) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -156,10 +224,10 @@ func (d *database) setUserPassword(ctx context.Context, username, passwordHash s
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO users(username, password_hash, created_at, updated_at)
-		VALUES(?, ?, ?, ?)
-		ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at
-	`, username, passwordHash, now.Unix(), now.Unix()); err != nil {
+		INSERT INTO users(username, role, password_hash, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?)
+		ON CONFLICT(username) DO UPDATE SET role = excluded.role, password_hash = excluded.password_hash, updated_at = excluded.updated_at
+	`, username, role, passwordHash, now.Unix(), now.Unix()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -173,27 +241,40 @@ func (d *database) setUserPassword(ctx context.Context, username, passwordHash s
 
 func (d *database) findUser(ctx context.Context, username string) (user, error) {
 	var result user
-	err := d.db.QueryRowContext(ctx, `SELECT id, username, password_hash FROM users WHERE username = ?`, username).
-		Scan(&result.ID, &result.Username, &result.PasswordHash)
+	err := d.db.QueryRowContext(ctx, `SELECT id, username, role, password_hash FROM users WHERE username = ?`, username).
+		Scan(&result.ID, &result.Username, &result.Role, &result.PasswordHash)
 	return result, err
 }
 
 func (d *database) createSession(ctx context.Context, tokenHash string, userID int64, csrfToken, device, ip string, now time.Time) error {
-	_, err := d.db.ExecContext(ctx, `
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO sessions(token_hash, user_id, csrf_token, device_label, ip_address, created_at, expires_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?)
-	`, tokenHash, userID, csrfToken, device, ip, now.Unix(), now.Add(sessionTTL).Unix())
-	return err
+	`, tokenHash, userID, csrfToken, device, ip, now.Unix(), now.Add(sessionTTL).Unix()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO login_events(user_id, device_label, ip_address, created_at)
+		VALUES(?, ?, ?, ?)
+	`, userID, device, ip, now.Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *database) getSession(ctx context.Context, hash string, now time.Time) (session, error) {
 	var result session
 	var expires int64
 	err := d.db.QueryRowContext(ctx, `
-		SELECT s.token_hash, s.user_id, u.username, s.csrf_token, s.expires_at
+		SELECT s.token_hash, s.user_id, u.username, u.role, s.csrf_token, s.expires_at
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ? AND s.expires_at > ?
-	`, hash, now.Unix()).Scan(&result.TokenHash, &result.UserID, &result.Username, &result.CSRFToken, &expires)
+	`, hash, now.Unix()).Scan(&result.TokenHash, &result.UserID, &result.Username, &result.Role, &result.CSRFToken, &expires)
 	result.ExpiresAt = time.Unix(expires, 0).UTC()
 	return result, err
 }
@@ -282,6 +363,132 @@ func (d *database) deleteItem(ctx context.Context, userID int64, kind string, it
 		return "", err
 	}
 	return storedName, nil
+}
+
+func (d *database) listAdminUsers(ctx context.Context, now time.Time) ([]adminUserRecord, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT
+			u.id,
+			u.username,
+			u.role,
+			u.created_at,
+			u.updated_at,
+			(SELECT MAX(created_at) FROM login_events WHERE user_id = u.id) AS last_login_at,
+			(
+				SELECT MAX(created_at) FROM (
+					SELECT created_at FROM texts WHERE user_id = u.id
+					UNION ALL
+					SELECT created_at FROM files WHERE user_id = u.id
+				)
+			) AS last_upload_at,
+			(SELECT COUNT(*) FROM texts WHERE user_id = u.id AND expires_at > ?) AS text_count,
+			(SELECT COUNT(*) FROM files WHERE user_id = u.id AND expires_at > ?) AS file_count,
+			(SELECT COUNT(*) FROM login_events WHERE user_id = u.id) AS login_count
+		FROM users u
+		ORDER BY CASE u.role WHEN 'admin' THEN 0 ELSE 1 END, u.username COLLATE NOCASE
+	`, now.Unix(), now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := make([]adminUserRecord, 0)
+	for rows.Next() {
+		var record adminUserRecord
+		var created, updated int64
+		var lastLogin, lastUpload sql.NullInt64
+		if err := rows.Scan(
+			&record.ID,
+			&record.Username,
+			&record.Role,
+			&created,
+			&updated,
+			&lastLogin,
+			&lastUpload,
+			&record.TextCount,
+			&record.FileCount,
+			&record.LoginCount,
+		); err != nil {
+			return nil, err
+		}
+		record.CreatedAt = time.Unix(created, 0).UTC()
+		record.UpdatedAt = time.Unix(updated, 0).UTC()
+		if lastLogin.Valid {
+			value := time.Unix(lastLogin.Int64, 0).UTC()
+			record.LastLoginAt = &value
+		}
+		if lastUpload.Valid {
+			value := time.Unix(lastUpload.Int64, 0).UTC()
+			record.LastUploadAt = &value
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (d *database) findUserByID(ctx context.Context, userID int64) (user, error) {
+	var result user
+	err := d.db.QueryRowContext(ctx, `SELECT id, username, role, password_hash FROM users WHERE id = ?`, userID).
+		Scan(&result.ID, &result.Username, &result.Role, &result.PasswordHash)
+	return result, err
+}
+
+func (d *database) setUserPasswordByID(ctx context.Context, userID int64, passwordHash string, now time.Time) error {
+	result, err := d.db.ExecContext(ctx, `
+		UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?
+	`, passwordHash, now.Unix(), userID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return sql.ErrNoRows
+	}
+	_, err = d.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID)
+	return err
+}
+
+func (d *database) deleteUser(ctx context.Context, userID int64) ([]string, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var role string
+	if err := tx.QueryRowContext(ctx, `SELECT role FROM users WHERE id = ?`, userID).Scan(&role); err != nil {
+		return nil, err
+	}
+	if role == roleAdmin {
+		return nil, errReservedAdminUsername
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT stored_name FROM files WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	var storedNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		storedNames = append(storedNames, name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return storedNames, nil
 }
 
 func (d *database) listItems(ctx context.Context, userID int64, now time.Time) ([]itemRecord, error) {

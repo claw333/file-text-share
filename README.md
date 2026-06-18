@@ -8,7 +8,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?style=flat-square&logo=sqlite&logoColor=white)](database.go)
 [![Docker Compose](https://img.shields.io/badge/Docker%20Compose-ready-2496ED?style=flat-square&logo=docker&logoColor=white)](compose.yaml)
 [![HTTPS](https://img.shields.io/badge/HTTPS-Let%27s%20Encrypt-003A70?style=flat-square&logo=letsencrypt&logoColor=white)](DEPLOYMENT.md)
-[![Auth](https://img.shields.io/badge/Auth-single%20account-7C3AED?style=flat-square)](security.go)
+[![Auth](https://img.shields.io/badge/Auth-admin%20%2B%20users-7C3AED?style=flat-square)](security.go)
 [![Password](https://img.shields.io/badge/Password-Argon2id-4B5563?style=flat-square)](security.go)
 
 ![CSRF](https://img.shields.io/badge/CSRF-protected-brightgreen?style=flat-square)
@@ -23,7 +23,10 @@
 
 ## 已实现
 
-- 单账号登录，无公开注册入口
+- 多账号登录，无公开注册入口
+- 保留 `admin` 管理员账号，普通用户禁止使用该用户名
+- 管理员后台可新增、删除普通用户，重置普通用户密码并查看登录/上传统计
+- 普通用户可在个人中心修改自己的密码，改密后自动登出
 - 12–128 位复杂密码与 Argon2id 哈希
 - 服务端会话、CSRF 校验和登录限速
 - 多条文本共享、复制状态和全部使用历史
@@ -38,10 +41,19 @@
 
 要求 Go 1.26 或更高版本。
 
-首次创建账号时，在终端安全输入密码：
+首次创建管理员账号时，在终端安全输入密码：
 
 ```bash
 cd /path/to/file-text-share
+read -s APP_ADMIN_PASSWORD
+export APP_ADMIN_PASSWORD
+go run . user set-admin-password
+unset APP_ADMIN_PASSWORD
+```
+
+管理员用户名固定为 `admin`。普通用户登录后进入共享页，管理员登录后进入后台页；普通用户可由后台创建，也可以通过服务器命令创建：
+
+```bash
 read -s APP_ADMIN_PASSWORD
 export APP_ADMIN_PASSWORD
 go run . user set-password demo
@@ -123,7 +135,7 @@ COMPOSE_PROJECT_NAME=file-text-share-staging
 
 测试证书不受浏览器信任。测试结束后运行 `docker compose down`，再将 `.env` 改为 `LETSENCRYPT_STAGING=false` 和 `COMPOSE_PROJECT_NAME=file-text-share`，从而使用全新的正式证书卷。
 
-### 3. 创建正式账号
+### 3. 创建管理员账号
 
 密码只通过临时环境变量传给管理命令，不写入 `.env`：
 
@@ -131,11 +143,11 @@ COMPOSE_PROJECT_NAME=file-text-share-staging
 docker compose build app
 read -s APP_ADMIN_PASSWORD
 export APP_ADMIN_PASSWORD
-docker compose run --rm --no-deps -e APP_ADMIN_PASSWORD app user set-password share-admin
+docker compose run --rm --no-deps -e APP_ADMIN_PASSWORD app user set-admin-password
 unset APP_ADMIN_PASSWORD
 ```
 
-首次运行时该命令会创建 `app-data` 持久化卷；以后重复执行可修改密码。
+首次运行时该命令会创建 `app-data` 持久化卷；以后重复执行可修改 `admin` 密码。普通用户建议登录管理员后台创建。
 
 ### 4. 首次签发证书并上线
 
