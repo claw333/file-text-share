@@ -305,6 +305,61 @@ func TestLoginRateLimitBlocksRotatingUsernamesFromSameIP(t *testing.T) {
 	}
 }
 
+func TestCleanupExpiredRemovesStaleLoginAttempts(t *testing.T) {
+	app := newTestApp(t)
+	current := app.server.now()
+	app.server.now = func() time.Time { return current }
+	key := loginIPAttemptPrefix + "198.51.100.20"
+
+	app.server.recordLoginFailure(key)
+	app.server.recordLoginFailure(key)
+
+	app.server.attemptMu.Lock()
+	attemptCount := len(app.server.attempts)
+	app.server.attemptMu.Unlock()
+	if attemptCount != 1 {
+		t.Fatalf("login attempt count = %d, want 1", attemptCount)
+	}
+
+	current = current.Add(16 * time.Minute)
+	if err := app.server.cleanupExpired(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	app.server.attemptMu.Lock()
+	attemptCount = len(app.server.attempts)
+	app.server.attemptMu.Unlock()
+	if attemptCount != 0 {
+		t.Fatalf("stale login attempt count = %d, want 0", attemptCount)
+	}
+}
+
+func TestCleanupExpiredKeepsLockedLoginAttempts(t *testing.T) {
+	app := newTestApp(t)
+	current := app.server.now()
+	app.server.now = func() time.Time { return current }
+	key := loginIPAttemptPrefix + "203.0.113.20"
+
+	for attempt := 0; attempt < 5; attempt++ {
+		app.server.recordLoginFailure(key)
+	}
+
+	current = current.Add(time.Minute)
+	if err := app.server.cleanupExpired(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	app.server.attemptMu.Lock()
+	stored, ok := app.server.attempts[key]
+	app.server.attemptMu.Unlock()
+	if !ok {
+		t.Fatal("locked login attempt was removed")
+	}
+	if !stored.lockedUntil.After(current) {
+		t.Fatalf("lockedUntil = %s, want after %s", stored.lockedUntil, current)
+	}
+}
+
 func TestPasswordChangeRevokesExistingSession(t *testing.T) {
 	app := newTestApp(t)
 	cookie, _ := app.login(t)

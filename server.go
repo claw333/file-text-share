@@ -30,11 +30,13 @@ const (
 	downloadTicketCookieName  = "share_download_ticket_"
 	loginIPAttemptPrefix      = "ip:"
 	loginAccountAttemptPrefix = "account:"
+	loginAttemptTTL           = 15 * time.Minute // Longer than the 5-minute lock window so active locks survive cleanup.
 )
 
 type loginAttempt struct {
 	failures    int
 	lockedUntil time.Time
+	lastSeen    time.Time
 }
 
 type downloadTicket struct {
@@ -757,9 +759,23 @@ func (s *server) cleanupExpiredTickets(now time.Time) {
 	}
 }
 
+func (s *server) cleanupExpiredAttempts(now time.Time) {
+	s.attemptMu.Lock()
+	defer s.attemptMu.Unlock()
+	for key, attempt := range s.attempts {
+		if attempt.lockedUntil.After(now) {
+			continue
+		}
+		if now.Sub(attempt.lastSeen) >= loginAttemptTTL {
+			delete(s.attempts, key)
+		}
+	}
+}
+
 func (s *server) cleanupExpired(ctx context.Context) error {
 	now := s.now()
 	s.cleanupExpiredTickets(now)
+	s.cleanupExpiredAttempts(now)
 	names, err := s.db.expiredFileNames(ctx, now)
 	if err != nil {
 		return err
@@ -849,6 +865,7 @@ func (s *server) recordLoginFailure(keys ...string) {
 	for _, key := range keys {
 		attempt := s.attempts[key]
 		attempt.failures++
+		attempt.lastSeen = now
 		if attempt.failures >= 5 {
 			attempt.lockedUntil = now.Add(5 * time.Minute)
 		}
