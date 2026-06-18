@@ -428,7 +428,7 @@
     const count = item.events.length;
     const statusText = count ? `已${isText ? "复制" : "下载"} ${count} 次` : `尚未${isText ? "使用" : "下载"}`;
     const retention = remainingLabel(item.expiresAt);
-    const kind = isText ? "文本" : `文件 · ${fileType(item)}`;
+    const kind = isText ? "文本" : `文件 · ${escapeHtml(fileType(item))}`;
     const icon = isText
       ? '<div class="item-type-badge text-icon">T</div>'
       : '<div class="item-type-badge file-icon"><svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6zM14 2v5h5" /></svg></div>';

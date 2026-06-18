@@ -70,6 +70,135 @@ function profileHarness(fetchImpl) {
   return { elements, listeners, redirects };
 }
 
+function shareHarness(fetchImpl) {
+  const listeners = {};
+  function element(extra = {}) {
+    return {
+      hidden: false,
+      textContent: "",
+      value: "",
+      disabled: false,
+      files: [],
+      dataset: {},
+      style: {},
+      classList: {
+        add() {},
+        remove() {},
+        toggle() {},
+      },
+      addEventListener(type, handler) {
+        listeners[type] = handler;
+      },
+      dispatchEvent() {},
+      querySelector(selector) {
+        return elements[selector] || null;
+      },
+      focus() {},
+      ...extra,
+    };
+  }
+  const itemList = element({
+    _html: "",
+    set innerHTML(value) {
+      this._html = value;
+    },
+    get innerHTML() {
+      return this._html;
+    },
+  });
+  const modal = element({
+    hidden: true,
+    querySelector(selector) {
+      return elements[selector] || null;
+    },
+  });
+  const filterTabs = [
+    element({ dataset: { filter: "all" } }),
+    element({ dataset: { filter: "text" } }),
+    element({ dataset: { filter: "file" } }),
+  ];
+  const elements = {
+    "#shared-text": element(),
+    "#character-count": element(),
+    "#publish-text": element(),
+    "#item-list": itemList,
+    "#empty-state": element({ hidden: true }),
+    "#file-input": element(),
+    "#drop-zone": element(),
+    "#upload-progress": element({ hidden: true }),
+    "#upload-file-name": element(),
+    "#upload-percent": element(),
+    "#upload-bar": element(),
+    "#delete-modal": modal,
+    ".modal-close": element(),
+    ".modal-cancel": element(),
+    ".modal-confirm": element(),
+    "#delete-title": element(),
+    "#toast": element({ hidden: true }),
+    "#toast-message": element(),
+    "#account-name": element(),
+    "#welcome-name": element(),
+    "#account-avatar": element(),
+    "#greeting": element(),
+    "#all-count": element(),
+    "#logout-button": element(),
+  };
+  const redirects = [];
+  const context = {
+    Headers,
+    FormData: class FormData {},
+    XMLHttpRequest: class XMLHttpRequest {},
+    fetch: fetchImpl,
+    navigator: { clipboard: { writeText() {} } },
+    window: {
+      clearTimeout() {},
+      setTimeout() {
+        return 1;
+      },
+      location: {
+        replace(target) {
+          redirects.push(target);
+        },
+      },
+    },
+    document: {
+      body: {
+        dataset: { page: "share" },
+        style: {},
+        appendChild() {},
+      },
+      createElement() {
+        return {
+          set textContent(value) {
+            this._text = value;
+          },
+          get innerHTML() {
+            return String(this._text)
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          },
+          addEventListener() {},
+          click() {},
+          remove() {},
+          select() {},
+        };
+      },
+      querySelector(selector) {
+        return elements[selector] || null;
+      },
+      querySelectorAll(selector) {
+        if (selector === ".filter-tab") return filterTabs;
+        return [];
+      },
+      addEventListener() {},
+      execCommand() {},
+    },
+  };
+  vm.runInNewContext(source, context);
+  return { elements, redirects };
+}
+
 test("profile password error stays on page and shows backend message", async () => {
   const requests = [];
   const harness = profileHarness(async (path, config) => {
@@ -100,4 +229,35 @@ test("profile session expiration still redirects to login", async () => {
 
   assert.deepEqual(harness.redirects, ["/"]);
   assert.equal(harness.elements["#toast"].hidden, true);
+});
+
+test("share item file type escapes file extension before rendering", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 42,
+          kind: "file",
+          fileName: "evil.</span>",
+          fileSize: 12,
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const html = harness.elements["#item-list"].innerHTML;
+  assert.equal(html.includes("</SPAN"), false);
+  assert.equal(html.includes("&lt;/SPAN"), true);
+  assert.deepEqual(harness.redirects, []);
 });
