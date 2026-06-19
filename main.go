@@ -44,15 +44,7 @@ func run() error {
 	defer cancel()
 	go app.cleanupLoop(ctx)
 
-	httpServer := &http.Server{
-		Addr:              cfg.addr,
-		Handler:           app.routes(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       2 * time.Hour,
-		WriteTimeout:      2 * time.Hour,
-		IdleTimeout:       90 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
+	httpServer := newHTTPServer(cfg, app.routes())
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -70,6 +62,18 @@ func run() error {
 			return nil
 		}
 		return err
+	}
+}
+
+func newHTTPServer(cfg config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              cfg.addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Minute,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 }
 

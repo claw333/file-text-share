@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -15,6 +16,9 @@ import (
 type database struct {
 	db *sql.DB
 }
+
+var errUserFileQuotaExceeded = errors.New("user file quota exceeded")
+var errUserTextQuotaExceeded = errors.New("user text quota exceeded")
 
 type user struct {
 	ID           int64
@@ -285,24 +289,71 @@ func (d *database) deleteSession(ctx context.Context, hash string) error {
 }
 
 func (d *database) createText(ctx context.Context, userID int64, body, device string, now time.Time) (int64, error) {
-	result, err := d.db.ExecContext(ctx, `
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	bodyRunes := utf8.RuneCountInString(body)
+	var usedRunes int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(length(body)), 0) FROM texts WHERE user_id = ? AND expires_at > ?
+	`, userID, now.Unix()).Scan(&usedRunes); err != nil {
+		return 0, err
+	}
+	if bodyRunes > maxUserTextRunes || usedRunes > maxUserTextRunes-bodyRunes {
+		return 0, errUserTextQuotaExceeded
+	}
+
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO texts(user_id, body, uploader_device, created_at, expires_at) VALUES(?, ?, ?, ?, ?)
 	`, userID, body, device, now.Unix(), now.Add(textTTL).Unix())
 	if err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (d *database) createFile(ctx context.Context, record fileRecord, device string, now time.Time) (int64, error) {
-	result, err := d.db.ExecContext(ctx, `
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var usedBytes int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(size_bytes), 0) FROM files WHERE user_id = ? AND expires_at > ?
+	`, record.UserID, now.Unix()).Scan(&usedBytes); err != nil {
+		return 0, err
+	}
+	if record.FileSize < 0 || record.FileSize > maxUserFileBytes || usedBytes > maxUserFileBytes-record.FileSize {
+		return 0, errUserFileQuotaExceeded
+	}
+
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO files(user_id, original_name, stored_name, size_bytes, mime_type, uploader_device, created_at, expires_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
 	`, record.UserID, record.FileName, record.StoredName, record.FileSize, record.MIMEType, device, now.Unix(), now.Add(fileTTL).Unix())
 	if err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (d *database) getFile(ctx context.Context, userID, fileID int64, now time.Time) (fileRecord, error) {
@@ -315,20 +366,40 @@ func (d *database) getFile(ctx context.Context, userID, fileID int64, now time.T
 }
 
 func (d *database) addEvent(ctx context.Context, userID int64, kind string, itemID int64, eventType, device string, now time.Time) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	table := "texts"
 	if kind == "file" {
 		table = "files"
 	}
 	var exists int
 	query := fmt.Sprintf(`SELECT 1 FROM %s WHERE id = ? AND user_id = ? AND expires_at > ?`, table)
-	if err := d.db.QueryRowContext(ctx, query, itemID, userID, now.Unix()).Scan(&exists); err != nil {
+	if err := tx.QueryRowContext(ctx, query, itemID, userID, now.Unix()).Scan(&exists); err != nil {
 		return err
 	}
-	_, err := d.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO events(user_id, item_kind, item_id, event_type, device_label, created_at)
 		VALUES(?, ?, ?, ?, ?, ?)
-	`, userID, kind, itemID, eventType, device, now.Unix())
-	return err
+	`, userID, kind, itemID, eventType, device, now.Unix()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM events
+		WHERE user_id = ? AND item_kind = ? AND item_id = ?
+		  AND id NOT IN (
+			SELECT id FROM events
+			WHERE user_id = ? AND item_kind = ? AND item_id = ?
+			ORDER BY created_at DESC, id DESC
+			LIMIT ?
+		  )
+	`, userID, kind, itemID, userID, kind, itemID, maxItemEvents); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *database) deleteItem(ctx context.Context, userID int64, kind string, itemID int64) (string, error) {
@@ -434,7 +505,13 @@ func (d *database) findUserByID(ctx context.Context, userID int64) (user, error)
 }
 
 func (d *database) setUserPasswordByID(ctx context.Context, userID int64, passwordHash string, now time.Time) error {
-	result, err := d.db.ExecContext(ctx, `
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
 		UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?
 	`, passwordHash, now.Unix(), userID)
 	if err != nil {
@@ -447,8 +524,10 @@ func (d *database) setUserPasswordByID(ctx context.Context, userID int64, passwo
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	_, err = d.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID)
-	return err
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *database) deleteUser(ctx context.Context, userID int64) ([]string, error) {

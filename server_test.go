@@ -325,6 +325,78 @@ func TestLoginRateLimitBlocksRotatingUsernamesFromSameIP(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsNonJSONContentType(t *testing.T) {
+	app := newTestApp(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"demo","password":"Prototype#2026"}`))
+	request.Header.Set("Content-Type", "text/plain")
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-JSON login status = %d, want %d", response.Code, http.StatusUnsupportedMediaType)
+	}
+}
+
+func TestLoginRateLimitBlocksSameAccountAcrossIPs(t *testing.T) {
+	app := newTestApp(t)
+
+	for attempt := 1; attempt <= 6; attempt++ {
+		payload, err := json.Marshal(map[string]string{
+			"username": "demo",
+			"password": "WrongPassword#2026",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "198.51.100." + strconv.Itoa(attempt) + ":49152"
+		response := httptest.NewRecorder()
+		app.handler.ServeHTTP(response, request)
+
+		if attempt < 6 && response.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, response.Code, http.StatusUnauthorized)
+		}
+		if attempt == 6 && response.Code != http.StatusTooManyRequests {
+			t.Fatalf("cross-IP same account status = %d, want %d", response.Code, http.StatusTooManyRequests)
+		}
+	}
+}
+
+func TestLoginAttemptsRejectNewKeysAtGlobalCap(t *testing.T) {
+	app := newTestApp(t)
+	now := app.server.now()
+
+	app.server.attemptMu.Lock()
+	for index := 0; index < maxLoginAttemptKeys; index++ {
+		app.server.attempts["seed:"+strconv.Itoa(index)] = loginAttempt{failures: 1, lastSeen: now}
+	}
+	app.server.attemptMu.Unlock()
+
+	payload, err := json.Marshal(map[string]string{
+		"username": "ghost-user",
+		"password": "WrongPassword#2026",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "203.0.113.250:49152"
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("login status at attempt cap = %d, want %d", response.Code, http.StatusTooManyRequests)
+	}
+	app.server.attemptMu.Lock()
+	attemptCount := len(app.server.attempts)
+	app.server.attemptMu.Unlock()
+	if attemptCount > maxLoginAttemptKeys {
+		t.Fatalf("login attempt keys = %d, want <= %d", attemptCount, maxLoginAttemptKeys)
+	}
+}
+
 func TestCleanupExpiredRemovesStaleLoginAttempts(t *testing.T) {
 	app := newTestApp(t)
 	current := app.server.now()
@@ -426,6 +498,43 @@ func TestPasswordChangeRevokesExistingSession(t *testing.T) {
 	}
 }
 
+func TestPasswordChangeRollsBackWhenSessionRevocationFails(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.db.db.Exec(`
+		CREATE TRIGGER deny_session_delete
+		BEFORE DELETE ON sessions
+		BEGIN
+			SELECT RAISE(FAIL, 'deny session delete');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.db.Exec(`
+		INSERT INTO sessions(token_hash, user_id, csrf_token, device_label, ip_address, created_at, expires_at)
+		VALUES('session-to-revoke', ?, 'csrf', 'test device', '127.0.0.1', ?, ?)
+	`, app.userID, app.server.now().Unix(), app.server.now().Add(sessionTTL).Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	newHash, err := hashPassword("UpdatedPassword#2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.setUserPasswordByID(context.Background(), app.userID, newHash, app.server.now().Add(time.Minute)); err == nil {
+		t.Fatal("setUserPasswordByID error = nil, want trigger failure")
+	}
+	account, err := app.db.findUserByID(context.Background(), app.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifyPassword(account.PasswordHash, "UpdatedPassword#2026") {
+		t.Fatal("password update survived failed session revocation")
+	}
+	if !verifyPassword(account.PasswordHash, "Prototype#2026") {
+		t.Fatal("original password was not preserved after rollback")
+	}
+}
+
 func TestSelfPasswordChangeRevokesSession(t *testing.T) {
 	app := newTestApp(t)
 	login := app.loginAs(t, "demo", "Prototype#2026")
@@ -518,6 +627,54 @@ func TestAuthenticationAndTextLifecycle(t *testing.T) {
 	}
 }
 
+func TestCreateTextRejectsUserQuotaExceeded(t *testing.T) {
+	app := newTestApp(t)
+	cookie, csrf := app.login(t)
+	now := app.server.now()
+	_, err := app.db.db.Exec(`
+		INSERT INTO texts(user_id, body, uploader_device, created_at, expires_at)
+		VALUES(?, ?, 'test device', ?, ?)
+	`, app.userID, strings.Repeat("x", maxUserTextRunes), now.Unix(), now.Add(textTTL).Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := performRequest(app.handler, http.MethodPost, "/api/texts", strings.NewReader(`{"text":"one more"}`), cookie, csrf)
+	if created.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("create text over quota status = %d, want %d; body = %s", created.Code, http.StatusRequestEntityTooLarge, created.Body.String())
+	}
+	items, err := app.db.listItems(context.Background(), app.userID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items after rejected text = %d, want 1", len(items))
+	}
+}
+
+func TestCopyEventsAreCappedPerItem(t *testing.T) {
+	app := newTestApp(t)
+	cookie, csrf := app.login(t)
+
+	created := performRequest(app.handler, http.MethodPost, "/api/texts", strings.NewReader(`{"text":"hello"}`), cookie, csrf)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create text status = %d, body = %s", created.Code, created.Body.String())
+	}
+	for index := 0; index < maxItemEvents+1; index++ {
+		copied := performRequest(app.handler, http.MethodPost, "/api/texts/1/copy", nil, cookie, csrf)
+		if copied.Code != http.StatusNoContent {
+			t.Fatalf("copy %d status = %d, body = %s", index, copied.Code, copied.Body.String())
+		}
+	}
+	items, err := app.db.listItems(context.Background(), app.userID, app.server.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || len(items[0].Events) != maxItemEvents {
+		t.Fatalf("event count = %#v, want %d events", items, maxItemEvents)
+	}
+}
+
 func TestHealthAndSecurityHeaders(t *testing.T) {
 	app := newTestApp(t)
 	response := performRequest(app.handler, http.MethodGet, "/healthz", nil, nil, "")
@@ -598,6 +755,51 @@ func TestFileUploadDownloadAndEvent(t *testing.T) {
 	}
 	if len(items) != 1 || len(items[0].Events) != 1 || items[0].Events[0].EventType != "download" {
 		t.Fatalf("download events = %#v", items)
+	}
+}
+
+func TestFileUploadRejectsUserQuotaExceeded(t *testing.T) {
+	app := newTestApp(t)
+	cookie, csrf := app.login(t)
+
+	if _, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: "existing-quota-file",
+		FileName:   "existing.bin",
+		FileSize:   maxUserFileBytes,
+		MIMEType:   "application/octet-stream",
+	}, "test device", app.server.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "tiny.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("tiny")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/files", &body)
+	request.AddCookie(cookie)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-CSRF-Token", csrf)
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("upload over quota status = %d, want %d; body = %s", response.Code, http.StatusRequestEntityTooLarge, response.Body.String())
+	}
+	entries, err := os.ReadDir(app.server.cfg.uploadDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("upload directory entries after rejected upload = %d, want 0", len(entries))
 	}
 }
 
@@ -732,6 +934,41 @@ func TestCleanupExpiredRemovesUnusedDownloadTickets(t *testing.T) {
 	app.server.ticketMu.Unlock()
 	if ticketCount != 0 {
 		t.Fatalf("expired ticket count = %d, want 0", ticketCount)
+	}
+}
+
+func TestDownloadTicketRejectsWhenLiveTicketCapReached(t *testing.T) {
+	app := newTestApp(t)
+	current := app.server.now()
+	app.server.now = func() time.Time { return current }
+	cookie, csrf := app.login(t)
+
+	fileID, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: "stored-file",
+		FileName:   "hello.txt",
+		FileSize:   5,
+		MIMEType:   "text/plain",
+	}, "test device", current)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app.server.ticketMu.Lock()
+	for index := 0; index < maxDownloadTickets; index++ {
+		app.server.tickets["seed-"+strconv.Itoa(index)] = downloadTicket{fileID: fileID, sessionHash: "other-session", expiresAt: current.Add(time.Minute)}
+	}
+	app.server.ticketMu.Unlock()
+
+	response := performRequest(app.handler, http.MethodPost, "/api/files/"+strconv.FormatInt(fileID, 10)+"/download-ticket", nil, cookie, csrf)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("ticket status at cap = %d, want %d; body = %s", response.Code, http.StatusTooManyRequests, response.Body.String())
+	}
+	app.server.ticketMu.Lock()
+	ticketCount := len(app.server.tickets)
+	app.server.ticketMu.Unlock()
+	if ticketCount > maxDownloadTickets {
+		t.Fatalf("ticket count = %d, want <= %d", ticketCount, maxDownloadTickets)
 	}
 }
 

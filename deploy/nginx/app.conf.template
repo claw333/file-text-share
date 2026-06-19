@@ -44,8 +44,8 @@ server {
     ssl_session_tickets off;
 
     client_max_body_size 1025m;
-    client_body_timeout 2h;
-    send_timeout 2h;
+    client_body_timeout 60s;
+    send_timeout 60s;
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
@@ -67,7 +67,7 @@ server {
 
         proxy_request_buffering off;
         proxy_buffering off;
-        proxy_read_timeout 2h;
-        proxy_send_timeout 2h;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
     }
 }

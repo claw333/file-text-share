@@ -31,6 +31,7 @@ const (
 	loginIPAttemptPrefix      = "ip:"
 	loginAccountAttemptPrefix = "account:"
 	loginAttemptTTL           = 15 * time.Minute // Longer than the 5-minute lock window so active locks survive cleanup.
+	maxLoginAttemptKeys       = 4096
 )
 
 type loginAttempt struct {
@@ -490,6 +491,10 @@ func (s *server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
 	id, err := s.db.createText(r.Context(), sess.UserID, input.Text, simplifyUserAgent(r.UserAgent()), s.now())
 	if err != nil {
+		if errors.Is(err, errUserTextQuotaExceeded) {
+			writeError(w, http.StatusRequestEntityTooLarge, "文本存储空间已达上限，请删除旧文本后再试")
+			return
+		}
 		s.logger.Error("create text", "error", err)
 		writeError(w, http.StatusInternalServerError, "发送文本失败")
 		return
@@ -626,6 +631,10 @@ func (s *server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		MIMEType:   mimeType,
 	}, simplifyUserAgent(r.UserAgent()), s.now())
 	if err != nil {
+		if errors.Is(err, errUserFileQuotaExceeded) {
+			writeError(w, http.StatusRequestEntityTooLarge, "文件存储空间已达上限，请删除旧文件后再试")
+			return
+		}
 		s.logger.Error("create file metadata", "error", err)
 		writeError(w, http.StatusInternalServerError, "保存文件信息失败")
 		return
@@ -668,6 +677,11 @@ func (s *server) handleDownloadTicket(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	s.cleanupExpiredTickets(now)
 	s.ticketMu.Lock()
+	if len(s.tickets) >= maxDownloadTickets {
+		s.ticketMu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "下载请求过多，请稍后再试")
+		return
+	}
 	s.tickets[token] = downloadTicket{fileID: id, sessionHash: sess.TokenHash, expiresAt: now.Add(time.Minute)}
 	s.ticketMu.Unlock()
 
@@ -825,7 +839,7 @@ func (s *server) clientIP(r *http.Request) string {
 
 func (s *server) loginAttemptKeys(r *http.Request, username string) (string, string) {
 	ip := s.clientIP(r)
-	return loginIPAttemptPrefix + ip, loginAccountAttemptPrefix + ip + "|" + strings.ToLower(username)
+	return loginIPAttemptPrefix + ip, loginAccountAttemptPrefix + strings.ToLower(username)
 }
 
 func (s *server) loginDelay(keys ...string) (time.Duration, bool) {
@@ -833,6 +847,18 @@ func (s *server) loginDelay(keys ...string) (time.Duration, bool) {
 	defer s.attemptMu.Unlock()
 
 	now := s.now()
+	if len(s.attempts) >= maxLoginAttemptKeys {
+		allKeysUnknown := true
+		for _, key := range keys {
+			if _, ok := s.attempts[key]; ok {
+				allKeysUnknown = false
+				break
+			}
+		}
+		if allKeysUnknown {
+			return 5 * time.Minute, true
+		}
+	}
 	var maxDelay time.Duration
 	var lockedFor time.Duration
 	for _, key := range keys {
@@ -866,7 +892,10 @@ func (s *server) recordLoginFailure(keys ...string) {
 	defer s.attemptMu.Unlock()
 	now := s.now()
 	for _, key := range keys {
-		attempt := s.attempts[key]
+		attempt, exists := s.attempts[key]
+		if !exists && len(s.attempts) >= maxLoginAttemptKeys {
+			continue
+		}
 		attempt.failures++
 		attempt.lastSeen = now
 		if attempt.failures >= 5 {
@@ -885,6 +914,14 @@ func (s *server) clearLoginFailures(keys ...string) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any, maxBytes int64) error {
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || contentType != "application/json" {
+		writeError(w, http.StatusUnsupportedMediaType, "请求 Content-Type 必须是 application/json")
+		if err != nil {
+			return err
+		}
+		return errors.New("unsupported JSON content type")
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
