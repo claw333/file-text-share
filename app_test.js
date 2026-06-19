@@ -140,6 +140,10 @@ function shareHarness(fetchImpl) {
     "#welcome-name": element(),
     "#account-avatar": element(),
     "#greeting": element(),
+    "#storage-used": element(),
+    "#storage-quota": element(),
+    "#storage-percent": element(),
+    "#storage-bar": element(),
     "#all-count": element(),
     "#logout-button": element(),
   };
@@ -381,6 +385,30 @@ test("share item file type escapes file extension before rendering", async () =>
   assert.equal(html.includes("</SPAN"), false);
   assert.equal(html.includes("&lt;/SPAN"), true);
   assert.deepEqual(harness.redirects, []);
+});
+
+test("share page renders current user storage usage", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        storageUsedBytes: 1536,
+        storageQuotaBytes: 5368709120,
+        items: [],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(harness.elements["#storage-used"].textContent, "1.5 KB");
+  assert.equal(harness.elements["#storage-quota"].textContent, "5 GB");
+  assert.equal(harness.elements["#storage-percent"].textContent, "0.01%");
+  assert.equal(harness.elements["#storage-bar"].style.width, "0.01%");
 });
 
 test("admin users render storage quota and used space", async () => {

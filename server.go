@@ -362,13 +362,24 @@ func (s *server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 
 func (s *server) handleItems(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
-	items, err := s.db.listItems(r.Context(), sess.UserID, s.now())
+	now := s.now()
+	items, err := s.db.listItems(r.Context(), sess.UserID, now)
 	if err != nil {
 		s.logger.Error("list items", "error", err)
 		writeError(w, http.StatusInternalServerError, "读取共享内容失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	quotaBytes, usedBytes, err := userStorageQuotaAndUsage(r.Context(), s.db.db, sess.UserID, now)
+	if err != nil {
+		s.logger.Error("read user storage usage", "error", err)
+		writeError(w, http.StatusInternalServerError, "读取空间用量失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":             items,
+		"storageUsedBytes":  usedBytes,
+		"storageQuotaBytes": quotaBytes,
+	})
 }
 
 func (s *server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {

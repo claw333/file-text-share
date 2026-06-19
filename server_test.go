@@ -730,13 +730,18 @@ func TestAuthenticationAndTextLifecycle(t *testing.T) {
 		t.Fatalf("list status = %d, body = %s", listed.Code, listed.Body.String())
 	}
 	var listResult struct {
-		Items []itemRecord `json:"items"`
+		Items             []itemRecord `json:"items"`
+		StorageUsedBytes  int64        `json:"storageUsedBytes"`
+		StorageQuotaBytes int64        `json:"storageQuotaBytes"`
 	}
 	if err := json.Unmarshal(listed.Body.Bytes(), &listResult); err != nil {
 		t.Fatal(err)
 	}
 	if len(listResult.Items) != 1 || len(listResult.Items[0].Events) != 1 {
 		t.Fatalf("listed items = %#v", listResult.Items)
+	}
+	if listResult.StorageUsedBytes != int64(len("hello from phone")) || listResult.StorageQuotaBytes != defaultUserStorageQuotaBytes {
+		t.Fatalf("storage result = used %d quota %d", listResult.StorageUsedBytes, listResult.StorageQuotaBytes)
 	}
 
 	deleted := performRequest(app.handler, http.MethodDelete, "/api/texts/1", nil, cookie, csrf)
@@ -745,6 +750,56 @@ func TestAuthenticationAndTextLifecycle(t *testing.T) {
 	}
 	if createResult.ID != 1 {
 		t.Fatalf("created ID = %d, want 1", createResult.ID)
+	}
+}
+
+func TestItemsStorageUsageRestoresAfterFileDelete(t *testing.T) {
+	app := newTestApp(t)
+	cookie, csrf := app.login(t)
+	content := []byte("file quota lifecycle")
+
+	uploaded := uploadTestFile(t, app, cookie, csrf, "quota-lifecycle.txt", content)
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, body = %s", uploaded.Code, uploaded.Body.String())
+	}
+	var uploadResult struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(uploaded.Body.Bytes(), &uploadResult); err != nil {
+		t.Fatal(err)
+	}
+	afterUpload := performRequest(app.handler, http.MethodGet, "/api/items", nil, cookie, "")
+	if afterUpload.Code != http.StatusOK {
+		t.Fatalf("list after upload status = %d, body = %s", afterUpload.Code, afterUpload.Body.String())
+	}
+	var uploadList struct {
+		StorageUsedBytes  int64 `json:"storageUsedBytes"`
+		StorageQuotaBytes int64 `json:"storageQuotaBytes"`
+	}
+	if err := json.Unmarshal(afterUpload.Body.Bytes(), &uploadList); err != nil {
+		t.Fatal(err)
+	}
+	if uploadList.StorageUsedBytes != int64(len(content)) || uploadList.StorageQuotaBytes != defaultUserStorageQuotaBytes {
+		t.Fatalf("storage after upload = used %d quota %d", uploadList.StorageUsedBytes, uploadList.StorageQuotaBytes)
+	}
+
+	deleted := performRequest(app.handler, http.MethodDelete, "/api/files/"+strconv.FormatInt(uploadResult.ID, 10), nil, cookie, csrf)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, body = %s", deleted.Code, deleted.Body.String())
+	}
+	afterDelete := performRequest(app.handler, http.MethodGet, "/api/items", nil, cookie, "")
+	if afterDelete.Code != http.StatusOK {
+		t.Fatalf("list after delete status = %d, body = %s", afterDelete.Code, afterDelete.Body.String())
+	}
+	var deleteList struct {
+		StorageUsedBytes  int64 `json:"storageUsedBytes"`
+		StorageQuotaBytes int64 `json:"storageQuotaBytes"`
+	}
+	if err := json.Unmarshal(afterDelete.Body.Bytes(), &deleteList); err != nil {
+		t.Fatal(err)
+	}
+	if deleteList.StorageUsedBytes != 0 || deleteList.StorageQuotaBytes != defaultUserStorageQuotaBytes {
+		t.Fatalf("storage after delete = used %d quota %d", deleteList.StorageUsedBytes, deleteList.StorageQuotaBytes)
 	}
 }
 

@@ -381,6 +381,10 @@
   const uploadName = document.querySelector("#upload-file-name");
   const uploadPercent = document.querySelector("#upload-percent");
   const uploadBar = document.querySelector("#upload-bar");
+  const storageUsed = document.querySelector("#storage-used");
+  const storageQuota = document.querySelector("#storage-quota");
+  const storagePercent = document.querySelector("#storage-percent");
+  const storageBar = document.querySelector("#storage-bar");
   const modal = document.querySelector("#delete-modal");
   const toast = document.querySelector("#toast");
   const toastMessage = document.querySelector("#toast-message");
@@ -410,10 +414,33 @@
   }
 
   function formatSize(bytes) {
-    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${bytes} B`;
+    const value = Number(bytes) || 0;
+    if (value >= 1024 ** 3) return `${formatNumber(value / 1024 ** 3, 2)} GB`;
+    if (value >= 1024 ** 2) return `${formatNumber(value / 1024 ** 2, 1)} MB`;
+    if (value >= 1024) return `${formatNumber(value / 1024, 1)} KB`;
+    return `${value} B`;
+  }
+
+  function formatNumber(value, digits) {
+    return value.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
+  }
+
+  function formatStoragePercent(usedBytes, quotaBytes) {
+    const used = Number(usedBytes) || 0;
+    const quota = Number(quotaBytes) || 0;
+    if (quota <= 0 || used <= 0) return "0%";
+    const percent = Math.min(100, (used / quota) * 100);
+    const displayed = percent < 0.01 ? 0.01 : percent;
+    if (displayed >= 10) return `${formatNumber(displayed, 0)}%`;
+    return `${formatNumber(displayed, 2)}%`;
+  }
+
+  function renderStorage(usedBytes, quotaBytes) {
+    const percent = formatStoragePercent(usedBytes, quotaBytes);
+    storageUsed.textContent = formatSize(usedBytes);
+    storageQuota.textContent = formatSize(quotaBytes);
+    storagePercent.textContent = percent;
+    storageBar.style.width = percent;
   }
 
   function remainingLabel(expiresAt) {
@@ -500,6 +527,7 @@
   async function loadItems() {
     const payload = await api("/api/items", { method: "GET" });
     items = payload.items || [];
+    renderStorage(payload.storageUsedBytes || 0, payload.storageQuotaBytes || 0);
     renderItems();
   }
 
