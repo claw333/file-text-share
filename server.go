@@ -85,6 +85,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/admin/users", s.withAdmin(s.handleAdminUsers))
 	mux.HandleFunc("POST /api/admin/users", s.withAdmin(s.withCSRF(s.handleAdminCreateUser)))
 	mux.HandleFunc("POST /api/admin/users/{id}/password", s.withAdmin(s.withCSRF(s.handleAdminSetUserPassword)))
+	mux.HandleFunc("POST /api/admin/users/{id}/quota", s.withAdmin(s.withCSRF(s.handleAdminSetUserQuota)))
 	mux.HandleFunc("DELETE /api/admin/users/{id}", s.withAdmin(s.withCSRF(s.handleAdminDeleteUser)))
 	mux.HandleFunc("GET /api/items", s.withSession(s.handleItems))
 	mux.HandleFunc("POST /api/texts", s.withSession(s.withCSRF(s.handleCreateText)))
@@ -439,6 +440,51 @@ func (s *server) handleAdminSetUserPassword(w http.ResponseWriter, r *http.Reque
 	if err := s.db.setUserPasswordByID(r.Context(), id, hash, s.now()); err != nil {
 		s.logger.Error("admin set user password", "error", err)
 		writeError(w, http.StatusInternalServerError, "修改密码失败")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleAdminSetUserQuota(w http.ResponseWriter, r *http.Request) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "无效的用户编号")
+		return
+	}
+	target, err := s.db.findUserByID(r.Context(), id)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "读取用户失败")
+		return
+	}
+	if target.Role == roleAdmin {
+		writeError(w, http.StatusBadRequest, "管理员账号不使用普通用户空间上限")
+		return
+	}
+	var input struct {
+		StorageQuotaBytes int64 `json:"storageQuotaBytes"`
+	}
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil {
+		return
+	}
+	if input.StorageQuotaBytes <= 0 || input.StorageQuotaBytes > maxUserStorageQuotaBytes {
+		writeError(w, http.StatusBadRequest, "空间上限必须大于 0 且不能超过 100 TB")
+		return
+	}
+	if err := s.db.setUserStorageQuota(r.Context(), id, input.StorageQuotaBytes, s.now()); err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		if errors.Is(err, errReservedAdminUsername) {
+			writeError(w, http.StatusBadRequest, "管理员账号不使用普通用户空间上限")
+			return
+		}
+		s.logger.Error("admin set user quota", "error", err)
+		writeError(w, http.StatusInternalServerError, "修改空间上限失败")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

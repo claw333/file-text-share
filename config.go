@@ -9,15 +9,16 @@ import (
 )
 
 const (
-	maxFileBytes       = int64(1 << 30)
-	maxUserFileBytes   = 2 * maxFileBytes
-	maxTextRunes       = 100_000
-	maxUserTextRunes   = 2 * maxTextRunes
-	maxItemEvents      = 20
-	maxDownloadTickets = 256
-	textTTL            = 30 * 24 * time.Hour
-	fileTTL            = 7 * 24 * time.Hour
-	sessionTTL         = 7 * 24 * time.Hour
+	gib                          = int64(1024 * 1024 * 1024)
+	maxFileBytes                 = int64(1 << 30)
+	maxTextRunes                 = 100_000
+	defaultUserStorageQuotaBytes = 5 * gib
+	maxUserStorageQuotaBytes     = 100 * 1024 * gib
+	maxItemEvents                = 20
+	maxDownloadTickets           = 256
+	textTTL                      = 30 * 24 * time.Hour
+	fileTTL                      = 7 * 24 * time.Hour
+	sessionTTL                   = 7 * 24 * time.Hour
 )
 
 type config struct {

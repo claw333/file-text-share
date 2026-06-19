@@ -199,6 +199,127 @@ function shareHarness(fetchImpl) {
   return { elements, redirects };
 }
 
+function adminHarness(fetchImpl) {
+  const listeners = {};
+  function element(extra = {}) {
+    return {
+      hidden: false,
+      textContent: "",
+      value: "",
+      disabled: false,
+      attrs: {},
+      dataset: {},
+      style: {},
+      classList: { add() {}, remove() {}, toggle() {} },
+      addEventListener(type, handler) {
+        listeners[type] = handler;
+      },
+      setAttribute(name, value) {
+        this.attrs[name] = value;
+      },
+      querySelector(selector) {
+        return elements[selector] || null;
+      },
+      focus() {},
+      reset() {},
+      ...extra,
+    };
+  }
+  const usersContainer = element({
+    _html: "",
+    set innerHTML(value) {
+      this._html = value;
+    },
+    get innerHTML() {
+      return this._html;
+    },
+    querySelector(selector) {
+      if (selector === '[data-quota-for="2"]') return elements["quota-input-2"];
+      return elements[selector] || null;
+    },
+    addEventListener(type, handler) {
+      listeners[`users:${type}`] = handler;
+    },
+  });
+  const deleteModal = element({
+    hidden: true,
+    querySelector(selector) {
+      return elements[selector] || null;
+    },
+  });
+  const elements = {
+    "#admin-users": usersContainer,
+    "#admin-create-user-form": element(),
+    "#admin-stats": element({
+      _html: "",
+      set innerHTML(value) {
+        this._html = value;
+      },
+      get innerHTML() {
+        return this._html;
+      },
+    }),
+    "#toast": element({ hidden: true }),
+    "#toast-message": element(),
+    "#admin-delete-modal": deleteModal,
+    "#admin-delete-title": element(),
+    "#admin-delete-description": element(),
+    ".modal-close": element(),
+    ".modal-cancel": element(),
+    ".modal-confirm": element(),
+    "#admin-new-username": element(),
+    "#admin-new-password": element(),
+    "#account-name": element(),
+    "#account-avatar": element(),
+    "#admin-refresh-users": element(),
+    "#logout-button": element(),
+    "quota-input-2": element({ value: "10" }),
+  };
+  const redirects = [];
+  const context = {
+    Headers,
+    FormData: class FormData {},
+    fetch: fetchImpl,
+    Intl,
+    window: {
+      clearTimeout() {},
+      setTimeout() {
+        return 1;
+      },
+      location: {
+        replace(target) {
+          redirects.push(target);
+        },
+      },
+    },
+    document: {
+      body: {
+        dataset: { page: "admin" },
+        style: {},
+      },
+      createElement() {
+        return {
+          set textContent(value) {
+            this._text = value;
+          },
+          get innerHTML() {
+            return String(this._text)
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+          },
+        };
+      },
+      querySelector(selector) {
+        return elements[selector] || null;
+      },
+      addEventListener() {},
+    },
+  };
+  vm.runInNewContext(source, context);
+  return { elements, listeners, redirects };
+}
+
 test("profile password error stays on page and shows backend message", async () => {
   const requests = [];
   const harness = profileHarness(async (path, config) => {
@@ -260,4 +381,87 @@ test("share item file type escapes file extension before rendering", async () =>
   assert.equal(html.includes("</SPAN"), false);
   assert.equal(html.includes("&lt;/SPAN"), true);
   assert.deepEqual(harness.redirects, []);
+});
+
+test("admin users render storage quota and used space", async () => {
+  const harness = adminHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "admin", role: "admin", csrfToken: "csrf-token", redirectTo: "/admin.html" });
+    }
+    if (path === "/api/admin/users") {
+      return response(200, {
+        users: [{
+          id: 2,
+          username: "quotauser",
+          role: "user",
+          createdAt: "2026-06-13T08:30:00Z",
+          updatedAt: "2026-06-13T08:30:00Z",
+          lastLoginAt: null,
+          lastUploadAt: null,
+          textCount: 1,
+          fileCount: 1,
+          loginCount: 0,
+          storageUsedBytes: 1536,
+          storageQuotaBytes: 5368709120,
+        }, {
+          id: 3,
+          username: "tinyquota",
+          role: "user",
+          createdAt: "2026-06-13T08:30:00Z",
+          updatedAt: "2026-06-13T08:30:00Z",
+          lastLoginAt: null,
+          lastUploadAt: null,
+          textCount: 0,
+          fileCount: 0,
+          loginCount: 0,
+          storageUsedBytes: 0,
+          storageQuotaBytes: 107374,
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const html = harness.elements["#admin-users"].innerHTML;
+  assert.match(html, /1\.5 KB/);
+  assert.match(html, /5 GB/);
+  assert.match(html, /value="0\.0001"/);
+});
+
+test("admin quota save posts bytes with csrf token", async () => {
+  const requests = [];
+  const harness = adminHarness(async (path, config = {}) => {
+    requests.push({ path, config });
+    if (path === "/api/session") {
+      return response(200, { username: "admin", role: "admin", csrfToken: "csrf-token", redirectTo: "/admin.html" });
+    }
+    if (path === "/api/admin/users") {
+      return response(200, { users: [] });
+    }
+    if (path === "/api/admin/users/2/quota") {
+      return response(204, {});
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+  await harness.listeners["users:click"]({
+    target: {
+      closest(selector) {
+        if (selector === ".admin-save-quota") {
+          return { dataset: { userId: "2" }, disabled: false };
+        }
+        return null;
+      },
+    },
+  });
+
+  const quotaRequest = requests.find((request) => request.path === "/api/admin/users/2/quota");
+  assert.ok(quotaRequest);
+  assert.equal(quotaRequest.config.headers.get("X-CSRF-Token"), "csrf-token");
+  assert.equal(quotaRequest.config.body, JSON.stringify({ storageQuotaBytes: 10737418240 }));
 });

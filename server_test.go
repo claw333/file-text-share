@@ -134,6 +134,29 @@ func requestDownloadTicket(t *testing.T, app testApp, fileID int64, cookie *http
 	return ticket.URL, ticketCookies[0]
 }
 
+func uploadTestFile(t *testing.T, app testApp, cookie *http.Cookie, csrf, filename string, content []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/files", &body)
+	request.AddCookie(cookie)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-CSRF-Token", csrf)
+	response := httptest.NewRecorder()
+	app.handler.ServeHTTP(response, request)
+	return response
+}
+
 func TestReservedAdminAccountRole(t *testing.T) {
 	directory := t.TempDir()
 	db, err := openDatabase(filepath.Join(directory, "share.db"))
@@ -296,6 +319,104 @@ func TestAdminUserManagement(t *testing.T) {
 	afterDelete := performRequest(app.handler, http.MethodPost, "/api/login", strings.NewReader(`{"username":"alice","password":"AliceNewPassword#2026"}`), nil, "")
 	if afterDelete.Code != http.StatusUnauthorized {
 		t.Fatalf("deleted alice login status = %d", afterDelete.Code)
+	}
+}
+
+func TestDefaultStorageQuotaAndUsageInAdminList(t *testing.T) {
+	app := newTestApp(t)
+	now := app.server.now()
+	if _, err := app.db.createText(context.Background(), app.userID, "hello", "test device", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: "stored-usage-file",
+		FileName:   "usage.bin",
+		FileSize:   11,
+		MIMEType:   "application/octet-stream",
+	}, "test device", now); err != nil {
+		t.Fatal(err)
+	}
+
+	users, err := app.db.listAdminUsers(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var demo adminUserRecord
+	for _, user := range users {
+		if user.Username == "demo" {
+			demo = user
+			break
+		}
+	}
+	if demo.ID == 0 {
+		t.Fatal("demo user not listed")
+	}
+	if demo.StorageQuotaBytes != defaultUserStorageQuotaBytes {
+		t.Fatalf("demo quota = %d, want %d", demo.StorageQuotaBytes, defaultUserStorageQuotaBytes)
+	}
+	if demo.StorageUsedBytes != int64(len("hello"))+11 {
+		t.Fatalf("demo usage = %d, want %d", demo.StorageUsedBytes, int64(len("hello"))+11)
+	}
+}
+
+func TestAdminCanAdjustUserStorageQuota(t *testing.T) {
+	app := newTestApp(t)
+	adminHash, err := hashPassword("AdminPassword#2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.setAdminPassword(context.Background(), adminHash, app.server.now()); err != nil {
+		t.Fatal(err)
+	}
+	adminLogin := app.loginAs(t, "admin", "AdminPassword#2026")
+
+	create := performRequest(app.handler, http.MethodPost, "/api/admin/users", strings.NewReader(`{"username":"quotauser","password":"QuotaPassword#2026"}`), adminLogin.Cookie, adminLogin.CSRFToken)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create user status = %d, body = %s", create.Code, create.Body.String())
+	}
+	target, err := app.db.findUser(context.Background(), "quotauser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := performRequest(app.handler, http.MethodGet, "/api/admin/users", nil, adminLogin.Cookie, "")
+	if list.Code != http.StatusOK {
+		t.Fatalf("admin list status = %d, body = %s", list.Code, list.Body.String())
+	}
+	var listed struct {
+		Users []adminUserRecord `json:"users"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	var quotaUser adminUserRecord
+	for _, user := range listed.Users {
+		if user.Username == "quotauser" {
+			quotaUser = user
+			break
+		}
+	}
+	if quotaUser.StorageQuotaBytes != defaultUserStorageQuotaBytes {
+		t.Fatalf("new user quota = %d, want %d", quotaUser.StorageQuotaBytes, defaultUserStorageQuotaBytes)
+	}
+
+	update := performRequest(
+		app.handler,
+		http.MethodPost,
+		"/api/admin/users/"+strconv.FormatInt(target.ID, 10)+"/quota",
+		strings.NewReader(`{"storageQuotaBytes":10737418240}`),
+		adminLogin.Cookie,
+		adminLogin.CSRFToken,
+	)
+	if update.Code != http.StatusNoContent {
+		t.Fatalf("quota update status = %d, body = %s", update.Code, update.Body.String())
+	}
+	updated, err := app.db.findUserByID(context.Background(), target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.StorageQuotaBytes != 10*1024*1024*1024 {
+		t.Fatalf("updated quota = %d, want 10GiB", updated.StorageQuotaBytes)
 	}
 }
 
@@ -631,15 +752,20 @@ func TestCreateTextRejectsUserQuotaExceeded(t *testing.T) {
 	app := newTestApp(t)
 	cookie, csrf := app.login(t)
 	now := app.server.now()
-	_, err := app.db.db.Exec(`
-		INSERT INTO texts(user_id, body, uploader_device, created_at, expires_at)
-		VALUES(?, ?, 'test device', ?, ?)
-	`, app.userID, strings.Repeat("x", maxUserTextRunes), now.Unix(), now.Add(textTTL).Unix())
-	if err != nil {
+	if err := app.db.setUserStorageQuota(context.Background(), app.userID, 5, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: "existing-quota-file",
+		FileName:   "existing.bin",
+		FileSize:   4,
+		MIMEType:   "application/octet-stream",
+	}, "test device", now); err != nil {
 		t.Fatal(err)
 	}
 
-	created := performRequest(app.handler, http.MethodPost, "/api/texts", strings.NewReader(`{"text":"one more"}`), cookie, csrf)
+	created := performRequest(app.handler, http.MethodPost, "/api/texts", strings.NewReader(`{"text":"hi"}`), cookie, csrf)
 	if created.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("create text over quota status = %d, want %d; body = %s", created.Code, http.StatusRequestEntityTooLarge, created.Body.String())
 	}
@@ -761,36 +887,11 @@ func TestFileUploadDownloadAndEvent(t *testing.T) {
 func TestFileUploadRejectsUserQuotaExceeded(t *testing.T) {
 	app := newTestApp(t)
 	cookie, csrf := app.login(t)
-
-	if _, err := app.db.createFile(context.Background(), fileRecord{
-		UserID:     app.userID,
-		StoredName: "existing-quota-file",
-		FileName:   "existing.bin",
-		FileSize:   maxUserFileBytes,
-		MIMEType:   "application/octet-stream",
-	}, "test device", app.server.now()); err != nil {
+	if err := app.db.setUserStorageQuota(context.Background(), app.userID, 3, app.server.now()); err != nil {
 		t.Fatal(err)
 	}
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("file", "tiny.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := part.Write([]byte("tiny")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	request := httptest.NewRequest(http.MethodPost, "/api/files", &body)
-	request.AddCookie(cookie)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	request.Header.Set("X-CSRF-Token", csrf)
-	response := httptest.NewRecorder()
-	app.handler.ServeHTTP(response, request)
-
+	response := uploadTestFile(t, app, cookie, csrf, "tiny.txt", []byte("tiny"))
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("upload over quota status = %d, want %d; body = %s", response.Code, http.StatusRequestEntityTooLarge, response.Body.String())
 	}

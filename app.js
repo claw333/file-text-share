@@ -113,6 +113,26 @@
       }).format(new Date(value)).replaceAll("/", "-");
     }
 
+    function formatStorage(bytes) {
+      const value = Number(bytes) || 0;
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let size = value;
+      let unitIndex = 0;
+      while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex += 1;
+      }
+      const rounded = size >= 10 || Number.isInteger(size) ? size.toFixed(0) : size.toFixed(1);
+      return `${rounded} ${units[unitIndex]}`;
+    }
+
+    function formatQuotaGB(bytes) {
+      const gb = (Number(bytes) || 0) / (1024 ** 3);
+      if (Number.isInteger(gb)) return String(gb);
+      if (gb > 0 && gb < 0.01) return gb.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+      return gb.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+    }
+
     function showToast(message) {
       window.clearTimeout(toastTimer);
       toastMessage.textContent = message;
@@ -144,9 +164,10 @@
       usersContainer.innerHTML = users.map(function (user) {
         const isAdmin = user.role === "admin";
         const roleLabel = isAdmin ? "管理员" : "普通用户";
+        const storageText = `${formatStorage(user.storageUsedBytes)} / ${formatStorage(user.storageQuotaBytes)}`;
         const actions = isAdmin
           ? '<span class="admin-muted">保留账号</span>'
-          : `<label class="admin-password-reset"><span class="sr-only">新密码</span><input type="password" autocomplete="new-password" placeholder="新密码" data-password-for="${user.id}" /><button class="button button-soft admin-reset-password" type="button" data-user-id="${user.id}">改密</button></label><button class="icon-button action-delete admin-delete-user" type="button" data-user-id="${user.id}" aria-label="删除用户" title="删除用户"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>`;
+          : `<label class="admin-quota-control"><span class="sr-only">空间上限 GB</span><input type="number" min="0.01" step="0.01" inputmode="decimal" value="${formatQuotaGB(user.storageQuotaBytes)}" data-quota-for="${user.id}" /><span>GB</span><button class="button button-soft admin-save-quota" type="button" data-user-id="${user.id}">保存</button></label><label class="admin-password-reset"><span class="sr-only">新密码</span><input type="password" autocomplete="new-password" placeholder="新密码" data-password-for="${user.id}" /><button class="button button-soft admin-reset-password" type="button" data-user-id="${user.id}">改密</button></label><button class="icon-button action-delete admin-delete-user" type="button" data-user-id="${user.id}" aria-label="删除用户" title="删除用户"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>`;
         return `<article class="admin-user-card" data-user-id="${user.id}">
           <div class="admin-user-main">
             <span class="avatar">${escapeHtml(user.username.slice(0, 1).toUpperCase())}</span>
@@ -157,6 +178,7 @@
                 <div><dt>最近登录</dt><dd>${formatTime(user.lastLoginAt)}</dd></div>
                 <div><dt>最近上传</dt><dd>${formatTime(user.lastUploadAt)}</dd></div>
                 <div><dt>内容</dt><dd>${user.textCount} 文本 / ${user.fileCount} 文件</dd></div>
+                <div><dt>空间</dt><dd>${storageText}</dd></div>
                 <div><dt>登录次数</dt><dd>${user.loginCount}</dd></div>
               </dl>
             </div>
@@ -210,9 +232,22 @@
 
     usersContainer.addEventListener("click", async function (event) {
       const resetButton = event.target.closest(".admin-reset-password");
+      const quotaButton = event.target.closest(".admin-save-quota");
       const deleteButton = event.target.closest(".admin-delete-user");
       try {
-        if (resetButton) {
+        if (quotaButton) {
+          const id = quotaButton.dataset.userId;
+          const input = usersContainer.querySelector(`[data-quota-for="${id}"]`);
+          const quotaGB = Number(input.value);
+          if (!Number.isFinite(quotaGB) || quotaGB <= 0) {
+            showToast("请输入大于 0 的空间上限");
+            return;
+          }
+          const storageQuotaBytes = Math.round(quotaGB * (1024 ** 3));
+          await api(`/api/admin/users/${id}/quota`, { method: "POST", body: JSON.stringify({ storageQuotaBytes }) });
+          await loadUsers();
+          showToast("空间上限已更新");
+        } else if (resetButton) {
           const id = resetButton.dataset.userId;
           const input = usersContainer.querySelector(`[data-password-for="${id}"]`);
           if (!input.value) {
@@ -223,8 +258,7 @@
           input.value = "";
           await loadUsers();
           showToast("密码已修改，该用户需重新登录");
-        }
-        if (deleteButton) {
+        } else if (deleteButton) {
           const card = deleteButton.closest(".admin-user-card");
           const username = card.querySelector(".admin-user-title strong").textContent;
           openDeleteUserModal(deleteButton.dataset.userId, username);

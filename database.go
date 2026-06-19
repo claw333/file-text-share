@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -21,10 +20,11 @@ var errUserFileQuotaExceeded = errors.New("user file quota exceeded")
 var errUserTextQuotaExceeded = errors.New("user text quota exceeded")
 
 type user struct {
-	ID           int64
-	Username     string
-	Role         string
-	PasswordHash string
+	ID                int64
+	Username          string
+	Role              string
+	PasswordHash      string
+	StorageQuotaBytes int64
 }
 
 type session struct {
@@ -66,16 +66,18 @@ type fileRecord struct {
 }
 
 type adminUserRecord struct {
-	ID           int64      `json:"id"`
-	Username     string     `json:"username"`
-	Role         string     `json:"role"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
-	LastLoginAt  *time.Time `json:"lastLoginAt"`
-	LastUploadAt *time.Time `json:"lastUploadAt"`
-	TextCount    int64      `json:"textCount"`
-	FileCount    int64      `json:"fileCount"`
-	LoginCount   int64      `json:"loginCount"`
+	ID                int64      `json:"id"`
+	Username          string     `json:"username"`
+	Role              string     `json:"role"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+	LastLoginAt       *time.Time `json:"lastLoginAt"`
+	LastUploadAt      *time.Time `json:"lastUploadAt"`
+	TextCount         int64      `json:"textCount"`
+	FileCount         int64      `json:"fileCount"`
+	LoginCount        int64      `json:"loginCount"`
+	StorageUsedBytes  int64      `json:"storageUsedBytes"`
+	StorageQuotaBytes int64      `json:"storageQuotaBytes"`
 }
 
 func openDatabase(path string) (*database, error) {
@@ -108,14 +110,15 @@ func (d *database) migrate(ctx context.Context) error {
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA busy_timeout = 5000`,
-		`CREATE TABLE IF NOT EXISTS users (
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE,
 			role TEXT NOT NULL DEFAULT 'user',
 			password_hash TEXT NOT NULL,
+			storage_quota_bytes INTEGER NOT NULL DEFAULT %d,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
-		)`,
+		)`, defaultUserStorageQuotaBytes),
 		`CREATE TABLE IF NOT EXISTS sessions (
 			token_hash TEXT PRIMARY KEY,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -176,6 +179,12 @@ func (d *database) migrate(ctx context.Context) error {
 	if err := d.ensureColumn(ctx, "users", "role", "TEXT NOT NULL DEFAULT 'user'"); err != nil {
 		return err
 	}
+	if err := d.ensureColumn(ctx, "users", "storage_quota_bytes", fmt.Sprintf("INTEGER NOT NULL DEFAULT %d", defaultUserStorageQuotaBytes)); err != nil {
+		return err
+	}
+	if _, err := d.db.ExecContext(ctx, `UPDATE users SET storage_quota_bytes = ? WHERE storage_quota_bytes <= 0`, defaultUserStorageQuotaBytes); err != nil {
+		return fmt.Errorf("backfill user storage quota: %w", err)
+	}
 	if _, err := d.db.ExecContext(ctx, `UPDATE users SET role = ? WHERE lower(username) = ?`, roleAdmin, adminUsername); err != nil {
 		return fmt.Errorf("reserve admin role: %w", err)
 	}
@@ -228,10 +237,10 @@ func (d *database) setUserPasswordWithRole(ctx context.Context, username, passwo
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO users(username, role, password_hash, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?)
+		INSERT INTO users(username, role, password_hash, storage_quota_bytes, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?)
 		ON CONFLICT(username) DO UPDATE SET role = excluded.role, password_hash = excluded.password_hash, updated_at = excluded.updated_at
-	`, username, role, passwordHash, now.Unix(), now.Unix()); err != nil {
+	`, username, role, passwordHash, defaultUserStorageQuotaBytes, now.Unix(), now.Unix()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -245,8 +254,8 @@ func (d *database) setUserPasswordWithRole(ctx context.Context, username, passwo
 
 func (d *database) findUser(ctx context.Context, username string) (user, error) {
 	var result user
-	err := d.db.QueryRowContext(ctx, `SELECT id, username, role, password_hash FROM users WHERE username = ?`, username).
-		Scan(&result.ID, &result.Username, &result.Role, &result.PasswordHash)
+	err := d.db.QueryRowContext(ctx, `SELECT id, username, role, password_hash, storage_quota_bytes FROM users WHERE username = ?`, username).
+		Scan(&result.ID, &result.Username, &result.Role, &result.PasswordHash, &result.StorageQuotaBytes)
 	return result, err
 }
 
@@ -288,6 +297,29 @@ func (d *database) deleteSession(ctx context.Context, hash string) error {
 	return err
 }
 
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func userStorageQuotaAndUsage(ctx context.Context, q queryRower, userID int64, now time.Time) (int64, int64, error) {
+	var quotaBytes, usedBytes int64
+	err := q.QueryRowContext(ctx, `
+		SELECT
+			storage_quota_bytes,
+			(
+				SELECT COALESCE(SUM(bytes), 0)
+				FROM (
+					SELECT length(CAST(body AS BLOB)) AS bytes FROM texts WHERE user_id = users.id AND expires_at > ?
+					UNION ALL
+					SELECT size_bytes AS bytes FROM files WHERE user_id = users.id AND expires_at > ?
+				)
+			) AS storage_used_bytes
+		FROM users
+		WHERE id = ?
+	`, now.Unix(), now.Unix(), userID).Scan(&quotaBytes, &usedBytes)
+	return quotaBytes, usedBytes, err
+}
+
 func (d *database) createText(ctx context.Context, userID int64, body, device string, now time.Time) (int64, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -295,14 +327,12 @@ func (d *database) createText(ctx context.Context, userID int64, body, device st
 	}
 	defer tx.Rollback()
 
-	bodyRunes := utf8.RuneCountInString(body)
-	var usedRunes int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(length(body)), 0) FROM texts WHERE user_id = ? AND expires_at > ?
-	`, userID, now.Unix()).Scan(&usedRunes); err != nil {
+	bodyBytes := int64(len(body))
+	quotaBytes, usedBytes, err := userStorageQuotaAndUsage(ctx, tx, userID, now)
+	if err != nil {
 		return 0, err
 	}
-	if bodyRunes > maxUserTextRunes || usedRunes > maxUserTextRunes-bodyRunes {
+	if bodyBytes < 0 || usedBytes > quotaBytes-bodyBytes {
 		return 0, errUserTextQuotaExceeded
 	}
 
@@ -329,13 +359,11 @@ func (d *database) createFile(ctx context.Context, record fileRecord, device str
 	}
 	defer tx.Rollback()
 
-	var usedBytes int64
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(size_bytes), 0) FROM files WHERE user_id = ? AND expires_at > ?
-	`, record.UserID, now.Unix()).Scan(&usedBytes); err != nil {
+	quotaBytes, usedBytes, err := userStorageQuotaAndUsage(ctx, tx, record.UserID, now)
+	if err != nil {
 		return 0, err
 	}
-	if record.FileSize < 0 || record.FileSize > maxUserFileBytes || usedBytes > maxUserFileBytes-record.FileSize {
+	if record.FileSize < 0 || usedBytes > quotaBytes-record.FileSize {
 		return 0, errUserFileQuotaExceeded
 	}
 
@@ -454,10 +482,19 @@ func (d *database) listAdminUsers(ctx context.Context, now time.Time) ([]adminUs
 			) AS last_upload_at,
 			(SELECT COUNT(*) FROM texts WHERE user_id = u.id AND expires_at > ?) AS text_count,
 			(SELECT COUNT(*) FROM files WHERE user_id = u.id AND expires_at > ?) AS file_count,
-			(SELECT COUNT(*) FROM login_events WHERE user_id = u.id) AS login_count
+			(SELECT COUNT(*) FROM login_events WHERE user_id = u.id) AS login_count,
+			(
+				SELECT COALESCE(SUM(bytes), 0)
+				FROM (
+					SELECT length(CAST(body AS BLOB)) AS bytes FROM texts WHERE user_id = u.id AND expires_at > ?
+					UNION ALL
+					SELECT size_bytes AS bytes FROM files WHERE user_id = u.id AND expires_at > ?
+				)
+			) AS storage_used_bytes,
+			u.storage_quota_bytes
 		FROM users u
 		ORDER BY CASE u.role WHEN 'admin' THEN 0 ELSE 1 END, u.username COLLATE NOCASE
-	`, now.Unix(), now.Unix())
+	`, now.Unix(), now.Unix(), now.Unix(), now.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -479,6 +516,8 @@ func (d *database) listAdminUsers(ctx context.Context, now time.Time) ([]adminUs
 			&record.TextCount,
 			&record.FileCount,
 			&record.LoginCount,
+			&record.StorageUsedBytes,
+			&record.StorageQuotaBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -499,9 +538,40 @@ func (d *database) listAdminUsers(ctx context.Context, now time.Time) ([]adminUs
 
 func (d *database) findUserByID(ctx context.Context, userID int64) (user, error) {
 	var result user
-	err := d.db.QueryRowContext(ctx, `SELECT id, username, role, password_hash FROM users WHERE id = ?`, userID).
-		Scan(&result.ID, &result.Username, &result.Role, &result.PasswordHash)
+	err := d.db.QueryRowContext(ctx, `SELECT id, username, role, password_hash, storage_quota_bytes FROM users WHERE id = ?`, userID).
+		Scan(&result.ID, &result.Username, &result.Role, &result.PasswordHash, &result.StorageQuotaBytes)
 	return result, err
+}
+
+func (d *database) setUserStorageQuota(ctx context.Context, userID, quotaBytes int64, now time.Time) error {
+	if quotaBytes <= 0 || quotaBytes > maxUserStorageQuotaBytes {
+		return fmt.Errorf("invalid storage quota")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var role string
+	if err := tx.QueryRowContext(ctx, `SELECT role FROM users WHERE id = ?`, userID).Scan(&role); err != nil {
+		return err
+	}
+	if role == roleAdmin {
+		return errReservedAdminUsername
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE users SET storage_quota_bytes = ?, updated_at = ? WHERE id = ?`, quotaBytes, now.Unix(), userID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
 }
 
 func (d *database) setUserPasswordByID(ctx context.Context, userID int64, passwordHash string, now time.Time) error {
