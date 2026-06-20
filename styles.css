@@ -315,7 +315,8 @@ a { color: inherit; text-decoration: none; }
 .item-list { display: grid; gap: 10px; }
 .list-loading, .list-error { padding: 38px 20px; color: var(--muted); border: 1px dashed var(--line-strong); border-radius: var(--radius); text-align: center; }
 .list-error button { margin-left: 8px; padding: 5px 10px; color: var(--blue); border: 1px solid var(--line-strong); border-radius: 7px; background: white; cursor: pointer; }
-.share-item { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: white; box-shadow: 0 1px 2px rgba(18, 58, 111, 0.035); cursor: pointer; transition: border-color 160ms ease, box-shadow 160ms ease; }
+.share-item { display: flex; min-width: 0; min-height: 116px; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: white; box-shadow: 0 1px 2px rgba(18, 58, 111, 0.035); cursor: pointer; transition: border-color 160ms ease, box-shadow 160ms ease; }
+.share-item:not(.is-expanded) { align-items: center; }
 .share-item:hover { border-color: var(--line-strong); box-shadow: var(--shadow-sm); }
 .expiring-item { border-left: 3px solid #e2a14e; }
 .item-main { display: flex; min-width: 0; flex: 1; gap: 15px; }
@@ -330,9 +331,12 @@ a { color: inherit; text-decoration: none; }
 .status-used span { background: var(--teal); }
 .status-new { color: #7c704d; background: #f7f1dd; }
 .status-new span { background: #b49335; }
-.text-preview, .file-name { margin: 0 0 10px; color: var(--ink); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+.text-preview, .file-name { height: 22px; margin: 0 0 10px; overflow: hidden; color: var(--ink); font-size: 14px; line-height: 1.55; white-space: nowrap; text-overflow: ellipsis; overflow-wrap: normal; }
+.text-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; }
+.share-item.is-expanded .text-preview { display: none; }
 .file-name { font-weight: 650; }
 .item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 15px; color: var(--faint); font-size: 10px; }
+.share-item:not(.is-expanded) .item-meta { height: 17px; flex-wrap: nowrap; overflow: hidden; }
 .item-meta > span { display: inline-flex; align-items: center; gap: 5px; }
 .item-meta svg { width: 13px; height: 13px; }
 .item-meta .expiry { color: var(--muted); }
@@ -340,6 +344,22 @@ a { color: inherit; text-decoration: none; }
 .item-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; padding-top: 7px; cursor: default; }
 .action-delete:hover { color: var(--red); background: var(--red-soft); }
 .action-history.active { color: var(--blue); background: var(--blue-soft); }
+
+.item-detail { margin: 13px 0 12px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: #f8faff; cursor: default; }
+.detail-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; font-size: 11px; }
+.detail-title span { color: var(--faint); font-size: 10px; }
+.text-detail-body { max-height: 260px; margin: 0; overflow: auto; color: var(--ink); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.file-detail { display: flex; align-items: center; gap: 14px; }
+.file-thumbnail { display: flex; width: 128px; height: 92px; flex: 0 0 128px; align-items: center; justify-content: center; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 8px; background: white; }
+.generic-thumbnail { flex-direction: column; gap: 8px; color: var(--blue); }
+.generic-thumbnail svg { width: 31px; height: 31px; }
+.generic-thumbnail span { max-width: 92px; overflow: hidden; font-size: 12px; font-weight: 780; text-overflow: ellipsis; white-space: nowrap; }
+.image-thumbnail { padding: 0; cursor: zoom-in; }
+.image-thumbnail:hover { border-color: var(--blue); }
+.image-thumbnail img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.file-detail-copy { display: grid; min-width: 0; gap: 5px; }
+.file-detail-copy strong { overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.file-detail-copy span { color: var(--muted); font-size: 11px; }
 
 .history-panel { margin-top: 15px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #f8faff; }
 .history-title { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 11px; }
@@ -370,6 +390,10 @@ a { color: inherit; text-decoration: none; }
 .modal h2 { margin: 18px 0 8px; font-size: 20px; }
 .modal p { margin: 0; color: var(--muted); font-size: 13px; }
 .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 26px; }
+.image-preview-backdrop { position: fixed; z-index: 70; inset: 0; display: grid; padding: 24px; place-items: center; background: rgba(7, 31, 67, 0.68); backdrop-filter: blur(5px); }
+.image-preview-dialog { position: relative; display: grid; max-width: min(960px, 100%); max-height: calc(100svh - 48px); padding: 44px 18px 18px; border-radius: 12px; background: white; box-shadow: var(--shadow-lg); }
+.image-preview-close { position: absolute; top: 10px; right: 10px; }
+.image-preview-dialog img { display: block; max-width: calc(100vw - 84px); max-height: calc(100svh - 128px); width: auto; height: auto; object-fit: contain; border-radius: 8px; background: var(--paper); }
 
 .toast-region { position: fixed; z-index: 60; right: 24px; bottom: 24px; pointer-events: none; }
 .toast { display: flex; min-width: 240px; align-items: center; gap: 10px; padding: 13px 16px; color: white; border-radius: 12px; background: var(--navy); box-shadow: var(--shadow-lg); animation: toast-in 220ms ease-out; font-size: 12px; }
@@ -435,6 +459,9 @@ a { color: inherit; text-decoration: none; }
   .item-actions { justify-content: flex-end; margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--line); }
   .item-actions .button-soft { margin-right: auto; }
   .item-meta { gap: 6px 12px; }
+  .item-detail { margin-left: -47px; }
+  .file-detail { align-items: flex-start; }
+  .file-thumbnail { width: 112px; height: 86px; flex-basis: 112px; }
   .history-panel { margin-left: -47px; }
   .app-footer { display: grid; gap: 7px; text-align: center; }
   .app-footer p { justify-content: center; }

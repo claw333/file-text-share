@@ -94,6 +94,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/files", s.withSession(s.withCSRF(s.handleUploadFile)))
 	mux.HandleFunc("POST /api/files/{id}/download-ticket", s.withSession(s.withCSRF(s.handleDownloadTicket)))
 	mux.HandleFunc("GET /api/files/{id}/download", s.withSession(s.handleDownloadFile))
+	mux.HandleFunc("GET /api/files/{id}/preview", s.withSession(s.handleFilePreview))
 	mux.HandleFunc("DELETE /api/files/{id}", s.withSession(s.withCSRF(s.handleDeleteFile)))
 	return s.securityHeaders(s.requestLog(mux))
 }
@@ -796,6 +797,41 @@ func (s *server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("record download", "file_id", id, "error", err)
 		}
 	}
+	http.ServeContent(w, r, record.FileName, modTime, file)
+}
+
+func (s *server) handleFilePreview(w http.ResponseWriter, r *http.Request) {
+	id, err := parsePositiveID(r.PathValue("id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	sess := sessionFromContext(r.Context())
+	record, err := s.db.getFile(r.Context(), sess.UserID, id, s.now())
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !strings.HasPrefix(strings.ToLower(record.MIMEType), "image/") {
+		writeError(w, http.StatusUnsupportedMediaType, "仅支持预览图片文件")
+		return
+	}
+	file, err := os.Open(filepath.Join(s.cfg.uploadDir, record.StoredName))
+	if err != nil {
+		s.logger.Error("open preview file", "error", err, "file_id", id)
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+
+	modTime := time.Time{}
+	if info, err := file.Stat(); err == nil {
+		modTime = info.ModTime()
+	}
+	w.Header().Set("Content-Type", record.MIMEType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": record.FileName}))
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Header().Set("Vary", "Cookie")
 	http.ServeContent(w, r, record.FileName, modTime, file)
 }
 

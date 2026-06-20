@@ -939,6 +939,75 @@ func TestFileUploadDownloadAndEvent(t *testing.T) {
 	}
 }
 
+func TestImagePreviewRequiresImageAndDoesNotRecordDownload(t *testing.T) {
+	app := newTestApp(t)
+	cookie, _ := app.login(t)
+	if err := os.MkdirAll(app.server.cfg.uploadDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := app.server.now()
+	imageContent := []byte{0x89, 'P', 'N', 'G', '\r', '\n'}
+	if err := os.WriteFile(filepath.Join(app.server.cfg.uploadDir, "stored-preview-image"), imageContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	imageID, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: "stored-preview-image",
+		FileName:   "photo.png",
+		FileSize:   int64(len(imageContent)),
+		MIMEType:   "image/png",
+	}, "test device", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(app.server.cfg.uploadDir, "stored-preview-text"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	textID, err := app.db.createFile(context.Background(), fileRecord{
+		UserID:     app.userID,
+		StoredName: "stored-preview-text",
+		FileName:   "note.txt",
+		FileSize:   5,
+		MIMEType:   "text/plain",
+	}, "test device", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	preview := performRequest(app.handler, http.MethodGet, "/api/files/"+strconv.FormatInt(imageID, 10)+"/preview", nil, cookie, "")
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, body = %s", preview.Code, preview.Body.String())
+	}
+	if preview.Body.String() != string(imageContent) {
+		t.Fatalf("preview body = %q", preview.Body.String())
+	}
+	if contentType := preview.Header().Get("Content-Type"); contentType != "image/png" {
+		t.Fatalf("preview content type = %q", contentType)
+	}
+	if disposition := preview.Header().Get("Content-Disposition"); strings.Contains(disposition, "attachment") {
+		t.Fatalf("preview disposition = %q", disposition)
+	}
+	if cacheControl := preview.Header().Get("Cache-Control"); cacheControl != "private, max-age=300" {
+		t.Fatalf("preview cache control = %q", cacheControl)
+	}
+	if vary := preview.Header().Get("Vary"); vary != "Cookie" {
+		t.Fatalf("preview vary = %q", vary)
+	}
+	blocked := performRequest(app.handler, http.MethodGet, "/api/files/"+strconv.FormatInt(textID, 10)+"/preview", nil, cookie, "")
+	if blocked.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-image preview status = %d, body = %s", blocked.Code, blocked.Body.String())
+	}
+	items, err := app.db.listItems(context.Background(), app.userID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.ID == imageID && len(item.Events) != 0 {
+			t.Fatalf("preview events = %#v, want no download event", item.Events)
+		}
+	}
+}
+
 func TestFileUploadRejectsUserQuotaExceeded(t *testing.T) {
 	app := newTestApp(t)
 	cookie, csrf := app.login(t)

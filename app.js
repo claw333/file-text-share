@@ -386,11 +386,18 @@
   const storagePercent = document.querySelector("#storage-percent");
   const storageBar = document.querySelector("#storage-bar");
   const modal = document.querySelector("#delete-modal");
+  const imagePreviewModal = document.querySelector("#image-preview-modal");
+  const imagePreviewTitle = document.querySelector("#image-preview-title");
+  const imagePreviewImage = document.querySelector("#image-preview-image");
   const toast = document.querySelector("#toast");
   const toastMessage = document.querySelector("#toast-message");
+  const textPreviewLimit = 50;
+  const mobileTextPreviewLimit = 32;
+  const textDetailLimit = 1000;
   let items = [];
   let currentFilter = "all";
   let pendingDelete = null;
+  const expandedDetails = new Set();
   let toastTimer = null;
 
   itemList.innerHTML = '<div class="list-loading">正在读取共享内容…</div>';
@@ -399,6 +406,35 @@
     const div = document.createElement("div");
     div.textContent = value;
     return div.innerHTML;
+  }
+
+  function escapeAttribute(value) {
+    return escapeHtml(value).replaceAll('"', "&quot;");
+  }
+
+  function textKey(item) {
+    return `${item.kind}:${item.id}`;
+  }
+
+  function truncateText(value, limit) {
+    const characters = Array.from(value || "");
+    if (characters.length <= limit) return { text: value || "", truncated: false };
+    return { text: characters.slice(0, limit).join(""), truncated: true };
+  }
+
+  function compactPreviewText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function currentTextPreviewLimit() {
+    if (typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches) {
+      return mobileTextPreviewLimit;
+    }
+    return textPreviewLimit;
+  }
+
+  function textWithBreaks(value) {
+    return escapeHtml(value).replaceAll("\n", "<br>");
   }
 
   function formatTime(value) {
@@ -484,24 +520,61 @@
     return `<div class="history-panel" hidden><div class="history-title"><strong>${isText ? "使用" : "下载"}记录</strong><span>共 ${item.events.length} 次</span></div><ol>${rows}</ol></div>`;
   }
 
+  function isImageFile(item) {
+    return typeof item.mimeType === "string" && item.mimeType.toLowerCase().startsWith("image/");
+  }
+
+  function textDetailMarkup(item, expanded) {
+    const preview = truncateText(compactPreviewText(item.text), currentTextPreviewLimit());
+    const detail = truncateText(item.text, textDetailLimit);
+    return `<p class="text-preview">${textWithBreaks(preview.text)}${preview.truncated ? "…" : ""}</p>
+        <div class="item-detail text-detail"${expanded ? "" : " hidden"}>
+          <div class="detail-title"><strong>文本详情</strong><span>预览最多 1000 字</span></div>
+          <p class="text-detail-body">${textWithBreaks(detail.text)}${detail.truncated ? "…" : ""}</p>
+        </div>`;
+  }
+
+  function fileDetailMarkup(item, expanded) {
+    const type = escapeHtml(fileType(item));
+    const fileName = escapeHtml(item.fileName);
+    const safeName = escapeAttribute(item.fileName);
+    const mimeType = item.mimeType ? escapeHtml(item.mimeType) : "未知类型";
+    const preview = isImageFile(item)
+      ? `<button class="file-thumbnail image-thumbnail" type="button" aria-label="放大图片 ${safeName}">
+          <img src="/api/files/${item.id}/preview" alt="${safeName} 缩略图" loading="lazy" />
+        </button>`
+      : `<div class="file-thumbnail generic-thumbnail" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6zM14 2v5h5M9 13h6M9 17h6" /></svg>
+          <span>${type}</span>
+        </div>`;
+    return `<div class="item-detail file-detail"${expanded ? "" : " hidden"}>
+          ${preview}
+          <div class="file-detail-copy">
+            <strong>${fileName}</strong>
+            <span>${formatSize(item.fileSize)} · ${mimeType}</span>
+          </div>
+        </div>`;
+  }
+
   function renderItem(item) {
     const isText = item.kind === "text";
     const count = item.events.length;
     const statusText = count ? `已${isText ? "复制" : "下载"} ${count} 次` : `尚未${isText ? "使用" : "下载"}`;
     const retention = remainingLabel(item.expiresAt);
     const kind = isText ? "文本" : `文件 · ${escapeHtml(fileType(item))}`;
+    const expanded = expandedDetails.has(textKey(item));
     const icon = isText
       ? '<div class="item-type-badge text-icon">T</div>'
       : '<div class="item-type-badge file-icon"><svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6zM14 2v5h5" /></svg></div>';
     const content = isText
-      ? `<p class="text-preview">${escapeHtml(item.text).replaceAll("\n", "<br>")}</p>`
-      : `<p class="file-name">${escapeHtml(item.fileName)}</p>`;
+      ? textDetailMarkup(item, expanded)
+      : `<p class="file-name">${escapeHtml(item.fileName)}</p>${fileDetailMarkup(item, expanded)}`;
     const size = isText ? "" : `<span>${formatSize(item.fileSize)}</span>`;
     const primary = isText
       ? '<button class="button button-soft action-copy" type="button"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>复制</button>'
       : '<button class="button button-soft action-download" type="button"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>下载</button>';
 
-    return `<article class="share-item${retention.soon ? " expiring-item" : ""}" data-kind="${item.kind}" data-item-id="${item.id}">
+    return `<article class="share-item${retention.soon ? " expiring-item" : ""}${expanded ? " is-expanded" : ""}" data-kind="${item.kind}" data-item-id="${item.id}" aria-expanded="${expanded}">
       <div class="item-main">${icon}<div class="item-content">
         <div class="item-topline"><span class="kind-label">${kind}</span><span class="status-chip ${count ? "status-used" : "status-new"}"><span></span>${statusText}</span></div>
         ${content}
@@ -607,6 +680,34 @@
     historyButton.setAttribute("aria-expanded", String(!panel.hidden));
   }
 
+  function toggleDetail(card) {
+    const panel = card.querySelector(".item-detail");
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    const expanded = !panel.hidden;
+    const key = `${card.dataset.kind}:${card.dataset.itemId}`;
+    if (expanded) expandedDetails.add(key);
+    else expandedDetails.delete(key);
+    card.classList.toggle("is-expanded", expanded);
+    card.setAttribute("aria-expanded", String(expanded));
+  }
+
+  function openImagePreview(item) {
+    imagePreviewTitle.textContent = item.fileName;
+    imagePreviewImage.src = `/api/files/${item.id}/preview`;
+    imagePreviewImage.alt = item.fileName;
+    imagePreviewModal.hidden = false;
+    document.body.style.overflow = "hidden";
+    imagePreviewModal.querySelector(".image-preview-close").focus();
+  }
+
+  function closeImagePreview() {
+    imagePreviewModal.hidden = true;
+    imagePreviewImage.removeAttribute("src");
+    imagePreviewImage.alt = "";
+    if (modal.hidden) document.body.style.overflow = "";
+  }
+
   itemList.addEventListener("click", async function (event) {
     const card = event.target.closest(".share-item");
     if (!card) return;
@@ -616,8 +717,13 @@
     const downloadButton = event.target.closest(".action-download");
     const historyButton = event.target.closest(".action-history");
     const deleteButton = event.target.closest(".action-delete");
+    const imageButton = event.target.closest(".image-thumbnail");
 
     try {
+      if (imageButton) {
+        openImagePreview(item);
+        return;
+      }
       if (copyButton) {
         await copyItem(item);
         return;
@@ -634,8 +740,12 @@
         modal.querySelector(".modal-cancel").focus();
         return;
       }
-      if (historyButton || !event.target.closest(".item-actions")) {
+      if (historyButton) {
         toggleHistory(card);
+        return;
+      }
+      if (!event.target.closest(".item-actions")) {
+        toggleDetail(card);
       }
     } catch (error) {
       showToast(error.message);
@@ -651,7 +761,13 @@
   modal.querySelector(".modal-close").addEventListener("click", closeModal);
   modal.querySelector(".modal-cancel").addEventListener("click", closeModal);
   modal.addEventListener("click", function (event) { if (event.target === modal) closeModal(); });
-  document.addEventListener("keydown", function (event) { if (event.key === "Escape" && !modal.hidden) closeModal(); });
+  imagePreviewModal.querySelector(".image-preview-close").addEventListener("click", closeImagePreview);
+  imagePreviewModal.addEventListener("click", function (event) { if (event.target === imagePreviewModal) closeImagePreview(); });
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    if (!imagePreviewModal.hidden) closeImagePreview();
+    else if (!modal.hidden) closeModal();
+  });
   modal.querySelector(".modal-confirm").addEventListener("click", async function () {
     if (!pendingDelete) return;
     const item = pendingDelete;

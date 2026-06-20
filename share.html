@@ -227,6 +227,14 @@
       </section>
     </div>
 
+    <div class="image-preview-backdrop" id="image-preview-modal" hidden>
+      <section class="image-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="image-preview-title">
+        <button class="icon-button image-preview-close" type="button" aria-label="关闭图片预览"><svg viewBox="0 0 24 24"><path d="m5 5 14 14M19 5 5 19" /></svg></button>
+        <h2 class="sr-only" id="image-preview-title">图片预览</h2>
+        <img id="image-preview-image" alt="" />
+      </section>
+    </div>
+
     <div class="toast-region" aria-live="polite" aria-atomic="true">
       <div class="toast" id="toast" hidden>
         <span class="toast-icon"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg></span>

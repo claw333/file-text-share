@@ -75,7 +75,7 @@ function profileHarness(fetchImpl) {
   return { elements, listeners, redirects };
 }
 
-function shareHarness(fetchImpl) {
+function shareHarness(fetchImpl, options = {}) {
   const listeners = {};
   function element(extra = {}) {
     return {
@@ -120,6 +120,12 @@ function shareHarness(fetchImpl) {
       return elements[selector] || null;
     },
   });
+  const imagePreviewModal = element({
+    hidden: true,
+    querySelector(selector) {
+      return elements[selector] || null;
+    },
+  });
   const filterTabs = [
     element({ dataset: { filter: "all" } }),
     element({ dataset: { filter: "text" } }),
@@ -142,6 +148,10 @@ function shareHarness(fetchImpl) {
     ".modal-cancel": element(),
     ".modal-confirm": element(),
     "#delete-title": element(),
+    "#image-preview-modal": imagePreviewModal,
+    "#image-preview-title": element(),
+    "#image-preview-image": element({ src: "", alt: "" }),
+    ".image-preview-close": element(),
     "#toast": element({ hidden: true }),
     "#toast-message": element(),
     "#account-name": element(),
@@ -166,6 +176,14 @@ function shareHarness(fetchImpl) {
       clearTimeout() {},
       setTimeout() {
         return 1;
+      },
+      matchMedia(query) {
+        return {
+          matches: Boolean(options.mobile && query === "(max-width: 760px)"),
+          media: query,
+          addEventListener() {},
+          removeEventListener() {},
+        };
       },
       location: {
         replace(target) {
@@ -419,7 +437,7 @@ test("share page renders current user storage usage", async () => {
   assert.equal(harness.elements["#storage-bar"].style.width, "0.01%");
 });
 
-test("share item blank area toggles history like the history button", async () => {
+test("share item blank area toggles details while history button toggles history", async () => {
   const harness = shareHarness(async (path) => {
     if (path === "/api/session") {
       return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
@@ -443,7 +461,8 @@ test("share item blank area toggles history like the history button", async () =
   await flushAsync();
   await flushAsync();
 
-  const panel = { hidden: true };
+  const historyPanel = { hidden: true };
+  const detailPanel = { hidden: true };
   const historyButton = {
     attrs: {},
     active: false,
@@ -456,10 +475,22 @@ test("share item blank area toggles history like the history button", async () =
       this.attrs[name] = value;
     },
   };
+  const cardClasses = new Set();
   const card = {
     dataset: { kind: "text", itemId: "42" },
+    attrs: {},
+    classList: {
+      toggle(name, value) {
+        if (value) cardClasses.add(name);
+        else cardClasses.delete(name);
+      },
+    },
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
     querySelector(selector) {
-      if (selector === ".history-panel") return panel;
+      if (selector === ".history-panel") return historyPanel;
+      if (selector === ".item-detail") return detailPanel;
       if (selector === ".action-history") return historyButton;
       return null;
     },
@@ -467,19 +498,230 @@ test("share item blank area toggles history like the history button", async () =
   const blankTarget = {
     closest(selector) {
       if (selector === ".share-item") return card;
+      if (selector === ".item-actions") return null;
+      if (selector === ".image-thumbnail") return null;
+      if (selector === ".action-history") return null;
+      return null;
+    },
+  };
+  const historyTarget = {
+    closest(selector) {
+      if (selector === ".share-item") return card;
+      if (selector === ".action-history") return historyButton;
       return null;
     },
   };
 
   await harness.listeners["item-list:click"]({ target: blankTarget });
-  assert.equal(panel.hidden, false);
+  assert.equal(detailPanel.hidden, false);
+  assert.equal(cardClasses.has("is-expanded"), true);
+  assert.equal(card.attrs["aria-expanded"], "true");
+  assert.equal(historyPanel.hidden, true);
+
+  await harness.listeners["item-list:click"]({ target: blankTarget });
+  assert.equal(detailPanel.hidden, true);
+  assert.equal(cardClasses.has("is-expanded"), false);
+  assert.equal(card.attrs["aria-expanded"], "false");
+
+  await harness.listeners["item-list:click"]({ target: historyTarget });
+  assert.equal(detailPanel.hidden, true);
+  assert.equal(historyPanel.hidden, false);
   assert.equal(historyButton.active, true);
   assert.equal(historyButton.attrs["aria-expanded"], "true");
 
-  await harness.listeners["item-list:click"]({ target: blankTarget });
-  assert.equal(panel.hidden, true);
+  await harness.listeners["item-list:click"]({ target: historyTarget });
+  assert.equal(detailPanel.hidden, true);
+  assert.equal(historyPanel.hidden, true);
   assert.equal(historyButton.active, false);
   assert.equal(historyButton.attrs["aria-expanded"], "false");
+});
+
+test("share text detail truncates long text to 1000 characters", async () => {
+  const visible = "x".repeat(1000);
+  const hiddenTail = "TAIL_SHOULD_NOT_RENDER";
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 42,
+          kind: "text",
+          text: visible + hiddenTail,
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const html = harness.elements["#item-list"].innerHTML;
+  assert.match(html, /class="text-preview"/);
+  assert.match(html, /class="item-detail text-detail" hidden/);
+  assert.match(html, /预览最多 1000 字/);
+  assert.match(html, new RegExp(`${visible}…`));
+  assert.equal(html.includes(hiddenTail), false);
+});
+
+test("share text preview is one line and limited to 50 characters on desktop", async () => {
+  const visible = "x".repeat(50);
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 42,
+          kind: "text",
+          text: `${visible}\nSECOND_LINE_SHOULD_COLLAPSE`,
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const preview = harness.elements["#item-list"].innerHTML.match(/<p class="text-preview">([^<]*)<\/p>/)[1];
+  assert.equal(preview, `${visible}…`);
+  assert.equal(preview.includes("<br>"), false);
+  assert.equal(preview.includes("SECOND_LINE_SHOULD_COLLAPSE"), false);
+});
+
+test("share text preview uses a shorter mobile limit", async () => {
+  const visible = "m".repeat(32);
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 42,
+          kind: "text",
+          text: `${visible}MOBILE_TAIL`,
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  }, { mobile: true });
+
+  await flushAsync();
+  await flushAsync();
+
+  const preview = harness.elements["#item-list"].innerHTML.match(/<p class="text-preview">([^<]*)<\/p>/)[1];
+  assert.equal(preview, `${visible}…`);
+  assert.equal(preview.includes("MOBILE_TAIL"), false);
+});
+
+test("share file details render generic and image thumbnails", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 7,
+          kind: "file",
+          fileName: "script.py",
+          fileSize: 42,
+          mimeType: "text/x-python",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }, {
+          id: 8,
+          kind: "file",
+          fileName: "photo.png",
+          fileSize: 128,
+          mimeType: "image/png",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const html = harness.elements["#item-list"].innerHTML;
+  assert.match(html, /class="file-thumbnail generic-thumbnail"/);
+  assert.match(html, />PY<\/span>/);
+  assert.match(html, /class="file-thumbnail image-thumbnail"/);
+  assert.match(html, /src="\/api\/files\/8\/preview"/);
+  assert.match(html, /aria-label="放大图片 photo\.png"/);
+});
+
+test("share image thumbnail opens preview modal", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 8,
+          kind: "file",
+          fileName: "photo.png",
+          fileSize: 128,
+          mimeType: "image/png",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const card = {
+    dataset: { kind: "file", itemId: "8" },
+    querySelector() {
+      return null;
+    },
+  };
+  const imageButton = {};
+  const imageTarget = {
+    closest(selector) {
+      if (selector === ".share-item") return card;
+      if (selector === ".image-thumbnail") return imageButton;
+      return null;
+    },
+  };
+
+  await harness.listeners["item-list:click"]({ target: imageTarget });
+
+  assert.equal(harness.elements["#image-preview-modal"].hidden, false);
+  assert.equal(harness.elements["#image-preview-title"].textContent, "photo.png");
+  assert.equal(harness.elements["#image-preview-image"].src, "/api/files/8/preview");
+  assert.equal(harness.elements["#image-preview-image"].alt, "photo.png");
 });
 
 test("share storage summary keeps desktop labels unwrapped and spaced", () => {
@@ -488,6 +730,13 @@ test("share storage summary keeps desktop labels unwrapped and spaced", () => {
   assert.match(styles, /\.retention-summary small \{[^}]*white-space:\s*nowrap/);
   assert.match(styles, /\.retention-summary > div:not\(\.storage-summary\) \{[^}]*flex:\s*0 0 auto/);
   assert.match(styles, /\.storage-copy \{[^}]*gap:\s*0 8px/);
+});
+
+test("share collapsed records use one-line previews and uniform height", () => {
+  assert.match(styles, /\.share-item \{[^}]*min-height:\s*116px/);
+  assert.match(styles, /\.share-item:not\(\.is-expanded\) \{[^}]*align-items:\s*center/);
+  assert.match(styles, /\.text-preview,\s*\.file-name \{[^}]*height:\s*22px[^}]*white-space:\s*nowrap[^}]*text-overflow:\s*ellipsis/);
+  assert.match(styles, /\.text-preview \{[^}]*-webkit-line-clamp:\s*1/);
 });
 
 test("app footers omit the device timezone note", () => {
