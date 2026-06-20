@@ -512,7 +512,7 @@
         </div>${historyMarkup(item)}
       </div></div>
       <div class="item-actions">${primary}
-        <button class="icon-button action-history" type="button" aria-label="展开${isText ? "使用" : "下载"}记录" title="历史记录"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2" /></svg></button>
+        <button class="icon-button action-history" type="button" aria-label="展开${isText ? "使用" : "下载"}记录" aria-expanded="false" title="历史记录"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2" /></svg></button>
         <button class="icon-button action-delete" type="button" aria-label="删除${isText ? "文本" : "文件"}" title="删除"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></svg></button>
       </div></article>`;
   }
@@ -598,6 +598,15 @@
     window.setTimeout(loadItems, 1000);
   }
 
+  function toggleHistory(card) {
+    const panel = card.querySelector(".history-panel");
+    const historyButton = card.querySelector(".action-history");
+    if (!panel || !historyButton) return;
+    panel.hidden = !panel.hidden;
+    historyButton.classList.toggle("active", !panel.hidden);
+    historyButton.setAttribute("aria-expanded", String(!panel.hidden));
+  }
+
   itemList.addEventListener("click", async function (event) {
     const card = event.target.closest(".share-item");
     if (!card) return;
@@ -609,13 +618,13 @@
     const deleteButton = event.target.closest(".action-delete");
 
     try {
-      if (copyButton) await copyItem(item);
-      if (downloadButton) await downloadItem(item);
-      if (historyButton) {
-        const panel = card.querySelector(".history-panel");
-        panel.hidden = !panel.hidden;
-        historyButton.classList.toggle("active", !panel.hidden);
-        historyButton.setAttribute("aria-expanded", String(!panel.hidden));
+      if (copyButton) {
+        await copyItem(item);
+        return;
+      }
+      if (downloadButton) {
+        await downloadItem(item);
+        return;
       }
       if (deleteButton) {
         pendingDelete = item;
@@ -623,6 +632,10 @@
         modal.hidden = false;
         document.body.style.overflow = "hidden";
         modal.querySelector(".modal-cancel").focus();
+        return;
+      }
+      if (historyButton || !event.target.closest(".item-actions")) {
+        toggleHistory(card);
       }
     } catch (error) {
       showToast(error.message);

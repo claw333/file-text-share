@@ -107,6 +107,9 @@ function shareHarness(fetchImpl) {
     get innerHTML() {
       return this._html;
     },
+    addEventListener(type, handler) {
+      listeners[`item-list:${type}`] = handler;
+    },
   });
   const modal = element({
     hidden: true,
@@ -202,7 +205,7 @@ function shareHarness(fetchImpl) {
     },
   };
   vm.runInNewContext(source, context);
-  return { elements, redirects };
+  return { elements, listeners, redirects };
 }
 
 function adminHarness(fetchImpl) {
@@ -411,6 +414,69 @@ test("share page renders current user storage usage", async () => {
   assert.equal(harness.elements["#storage-quota"].textContent, "5 GB");
   assert.equal(harness.elements["#storage-percent"].textContent, "0.01%");
   assert.equal(harness.elements["#storage-bar"].style.width, "0.01%");
+});
+
+test("share item blank area toggles history like the history button", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 42,
+          kind: "text",
+          text: "review note",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [{ eventType: "copy", deviceLabel: "Mac · Chrome", createdAt: "2026-06-13T08:31:00Z" }],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const panel = { hidden: true };
+  const historyButton = {
+    attrs: {},
+    active: false,
+    classList: {
+      toggle(name, value) {
+        if (name === "active") historyButton.active = value;
+      },
+    },
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
+  };
+  const card = {
+    dataset: { kind: "text", itemId: "42" },
+    querySelector(selector) {
+      if (selector === ".history-panel") return panel;
+      if (selector === ".action-history") return historyButton;
+      return null;
+    },
+  };
+  const blankTarget = {
+    closest(selector) {
+      if (selector === ".share-item") return card;
+      return null;
+    },
+  };
+
+  await harness.listeners["item-list:click"]({ target: blankTarget });
+  assert.equal(panel.hidden, false);
+  assert.equal(historyButton.active, true);
+  assert.equal(historyButton.attrs["aria-expanded"], "true");
+
+  await harness.listeners["item-list:click"]({ target: blankTarget });
+  assert.equal(panel.hidden, true);
+  assert.equal(historyButton.active, false);
+  assert.equal(historyButton.attrs["aria-expanded"], "false");
 });
 
 test("share storage summary keeps desktop labels unwrapped and spaced", () => {
