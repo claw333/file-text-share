@@ -420,6 +420,7 @@ a { color: inherit; text-decoration: none; }
   .login-card-heading { margin-bottom: 30px; }
   .login-card-heading h2 { font-size: 28px; }
   .login-footer { margin-top: 34px; }
+  .login-card-heading > p:last-child, .login-footer { color: #536077; }
 
   .page-width { width: min(100% - 28px, 1180px); }
   .header-inner { height: 64px; }
@@ -459,6 +460,8 @@ a { color: inherit; text-decoration: none; }
   .item-actions { justify-content: flex-end; margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--line); }
   .item-actions .button-soft { margin-right: auto; }
   .item-meta { gap: 6px 12px; }
+  .share-item:not(.is-expanded) .item-meta { height: auto; flex-wrap: wrap; overflow: visible; line-height: 1.35; }
+  .share-item:not(.is-expanded) .item-meta > span { min-width: 0; max-width: 100%; line-height: 1.35; }
   .item-detail { margin-left: -47px; }
   .file-detail { align-items: flex-start; }
   .file-thumbnail { width: 112px; height: 86px; flex-basis: 112px; }

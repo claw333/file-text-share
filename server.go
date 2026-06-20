@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -248,8 +249,36 @@ func (s *server) serveStatic(name, contentType string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Add("Vary", "Accept-Encoding")
+		if acceptsGzip(r) {
+			w.Header().Set("Content-Encoding", "gzip")
+			writer := gzip.NewWriter(w)
+			defer writer.Close()
+			_, _ = writer.Write(content)
+			return
+		}
 		_, _ = w.Write(content)
 	}
+}
+
+func acceptsGzip(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		part = strings.TrimSpace(part)
+		token, parameters, _ := strings.Cut(part, ";")
+		if !strings.EqualFold(strings.TrimSpace(token), "gzip") {
+			continue
+		}
+		for _, parameter := range strings.Split(parameters, ";") {
+			name, value, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+			if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
+				continue
+			}
+			quality, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			return err != nil || quality > 0
+		}
+		return true
+	}
+	return false
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -870,6 +899,10 @@ func (s *server) cleanupExpiredTickets(now time.Time) {
 func (s *server) cleanupExpiredAttempts(now time.Time) {
 	s.attemptMu.Lock()
 	defer s.attemptMu.Unlock()
+	s.pruneExpiredAttemptsLocked(now)
+}
+
+func (s *server) pruneExpiredAttemptsLocked(now time.Time) {
 	for key, attempt := range s.attempts {
 		if attempt.lockedUntil.After(now) {
 			continue
@@ -878,6 +911,30 @@ func (s *server) cleanupExpiredAttempts(now time.Time) {
 			delete(s.attempts, key)
 		}
 	}
+}
+
+func (s *server) evictOldestUnlockedAttemptLocked(now time.Time, protected map[string]struct{}) bool {
+	var oldestKey string
+	var oldestSeen time.Time
+	found := false
+	for key, attempt := range s.attempts {
+		if _, ok := protected[key]; ok {
+			continue
+		}
+		if attempt.lockedUntil.After(now) {
+			continue
+		}
+		if !found || attempt.lastSeen.Before(oldestSeen) {
+			oldestKey = key
+			oldestSeen = attempt.lastSeen
+			found = true
+		}
+	}
+	if !found {
+		return false
+	}
+	delete(s.attempts, oldestKey)
+	return true
 }
 
 func (s *server) cleanupExpired(ctx context.Context) error {
@@ -940,18 +997,6 @@ func (s *server) loginDelay(keys ...string) (time.Duration, bool) {
 	defer s.attemptMu.Unlock()
 
 	now := s.now()
-	if len(s.attempts) >= maxLoginAttemptKeys {
-		allKeysUnknown := true
-		for _, key := range keys {
-			if _, ok := s.attempts[key]; ok {
-				allKeysUnknown = false
-				break
-			}
-		}
-		if allKeysUnknown {
-			return 5 * time.Minute, true
-		}
-	}
 	var maxDelay time.Duration
 	var lockedFor time.Duration
 	for _, key := range keys {
@@ -984,10 +1029,17 @@ func (s *server) recordLoginFailure(keys ...string) {
 	s.attemptMu.Lock()
 	defer s.attemptMu.Unlock()
 	now := s.now()
+	protected := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		protected[key] = struct{}{}
+	}
 	for _, key := range keys {
 		attempt, exists := s.attempts[key]
 		if !exists && len(s.attempts) >= maxLoginAttemptKeys {
-			continue
+			s.pruneExpiredAttemptsLocked(now)
+			if len(s.attempts) >= maxLoginAttemptKeys && !s.evictOldestUnlockedAttemptLocked(now, protected) {
+				continue
+			}
 		}
 		attempt.failures++
 		attempt.lastSeen = now

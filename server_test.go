@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -484,7 +486,7 @@ func TestLoginRateLimitBlocksSameAccountAcrossIPs(t *testing.T) {
 	}
 }
 
-func TestLoginAttemptsRejectNewKeysAtGlobalCap(t *testing.T) {
+func TestLoginAttemptsEvictOldestUnlockedKeysAtGlobalCap(t *testing.T) {
 	app := newTestApp(t)
 	now := app.server.now()
 
@@ -492,10 +494,13 @@ func TestLoginAttemptsRejectNewKeysAtGlobalCap(t *testing.T) {
 	for index := 0; index < maxLoginAttemptKeys; index++ {
 		app.server.attempts["seed:"+strconv.Itoa(index)] = loginAttempt{failures: 1, lastSeen: now}
 	}
+	app.server.attempts["seed:0"] = loginAttempt{failures: 1, lastSeen: now.Add(-2 * time.Minute)}
+	app.server.attempts["seed:1"] = loginAttempt{failures: 1, lastSeen: now.Add(-1 * time.Minute)}
 	app.server.attemptMu.Unlock()
 
+	username := "ghost-user"
 	payload, err := json.Marshal(map[string]string{
-		"username": "ghost-user",
+		"username": username,
 		"password": "WrongPassword#2026",
 	})
 	if err != nil {
@@ -507,14 +512,62 @@ func TestLoginAttemptsRejectNewKeysAtGlobalCap(t *testing.T) {
 	response := httptest.NewRecorder()
 	app.handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusTooManyRequests {
-		t.Fatalf("login status at attempt cap = %d, want %d", response.Code, http.StatusTooManyRequests)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("login status at attempt cap = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 	app.server.attemptMu.Lock()
 	attemptCount := len(app.server.attempts)
+	_, oldestExists := app.server.attempts["seed:0"]
+	_, secondOldestExists := app.server.attempts["seed:1"]
+	_, ipAttemptExists := app.server.attempts[loginIPAttemptPrefix+"203.0.113.250"]
+	_, accountAttemptExists := app.server.attempts[loginAccountAttemptPrefix+username]
 	app.server.attemptMu.Unlock()
-	if attemptCount > maxLoginAttemptKeys {
-		t.Fatalf("login attempt keys = %d, want <= %d", attemptCount, maxLoginAttemptKeys)
+	if attemptCount != maxLoginAttemptKeys {
+		t.Fatalf("login attempt keys = %d, want %d", attemptCount, maxLoginAttemptKeys)
+	}
+	if oldestExists || secondOldestExists {
+		t.Fatal("oldest unlocked login attempt keys were not evicted")
+	}
+	if !ipAttemptExists || !accountAttemptExists {
+		t.Fatal("new login attempt keys were not recorded at the global cap")
+	}
+}
+
+func TestLoginAttemptEvictionKeepsLockedKeys(t *testing.T) {
+	app := newTestApp(t)
+	now := app.server.now()
+	lockedKey := loginIPAttemptPrefix + "198.51.100.250"
+	newKey := loginIPAttemptPrefix + "203.0.113.251"
+
+	app.server.attemptMu.Lock()
+	app.server.attempts[lockedKey] = loginAttempt{
+		failures:    5,
+		lastSeen:    now.Add(-10 * time.Minute),
+		lockedUntil: now.Add(4 * time.Minute),
+	}
+	for index := 1; index < maxLoginAttemptKeys; index++ {
+		app.server.attempts["seed:"+strconv.Itoa(index)] = loginAttempt{
+			failures: 1,
+			lastSeen: now.Add(-time.Duration(index) * time.Millisecond),
+		}
+	}
+	app.server.attemptMu.Unlock()
+
+	app.server.recordLoginFailure(newKey)
+
+	app.server.attemptMu.Lock()
+	attemptCount := len(app.server.attempts)
+	_, lockedExists := app.server.attempts[lockedKey]
+	_, newExists := app.server.attempts[newKey]
+	app.server.attemptMu.Unlock()
+	if attemptCount != maxLoginAttemptKeys {
+		t.Fatalf("login attempt keys = %d, want %d", attemptCount, maxLoginAttemptKeys)
+	}
+	if !lockedExists {
+		t.Fatal("locked login attempt key was evicted")
+	}
+	if !newExists {
+		t.Fatal("new login attempt key was not recorded")
 	}
 }
 
@@ -870,6 +923,60 @@ func TestHealthAndSecurityHeaders(t *testing.T) {
 	} {
 		if response.Header().Get(header) == "" {
 			t.Fatalf("security header %s is missing", header)
+		}
+	}
+}
+
+func TestStaticAssetsUseGzipWhenAccepted(t *testing.T) {
+	app := newTestApp(t)
+	for _, acceptEncoding := range []string{"gzip", "br, gzip;q=0.5"} {
+		for _, path := range []string{"/", "/styles.css", "/app.js"} {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("Accept-Encoding", acceptEncoding)
+			response := httptest.NewRecorder()
+			app.handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, body = %s", path, response.Code, response.Body.String())
+			}
+			if encoding := response.Header().Get("Content-Encoding"); encoding != "gzip" {
+				t.Fatalf("%s with %q Content-Encoding = %q, want gzip", path, acceptEncoding, encoding)
+			}
+			if vary := response.Header().Values("Vary"); !slices.Contains(vary, "Accept-Encoding") {
+				t.Fatalf("%s Vary = %#v, want Accept-Encoding", path, vary)
+			}
+			reader, err := gzip.NewReader(bytes.NewReader(response.Body.Bytes()))
+			if err != nil {
+				t.Fatalf("%s gzip reader: %v", path, err)
+			}
+			body, err := io.ReadAll(reader)
+			if closeErr := reader.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				t.Fatalf("%s gzip read: %v", path, err)
+			}
+			if len(body) == 0 {
+				t.Fatalf("%s gzip body is empty", path)
+			}
+		}
+	}
+}
+
+func TestStaticAssetsSkipGzipWhenNotAccepted(t *testing.T) {
+	app := newTestApp(t)
+	for _, acceptEncoding := range []string{"", "br, gzip;q=0"} {
+		request := httptest.NewRequest(http.MethodGet, "/styles.css", nil)
+		request.Header.Set("Accept-Encoding", acceptEncoding)
+		response := httptest.NewRecorder()
+		app.handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("styles status = %d", response.Code)
+		}
+		if encoding := response.Header().Get("Content-Encoding"); encoding != "" {
+			t.Fatalf("Content-Encoding = %q, want empty", encoding)
+		}
+		if !strings.Contains(response.Body.String(), ":root") {
+			t.Fatalf("styles body does not look like CSS")
 		}
 	}
 }

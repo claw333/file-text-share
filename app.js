@@ -479,11 +479,17 @@
     storageBar.style.width = percent;
   }
 
-  function remainingLabel(expiresAt) {
-    const milliseconds = new Date(expiresAt).getTime() - Date.now();
-    const hours = Math.max(0, Math.ceil(milliseconds / 3_600_000));
+  function remainingLabel(item) {
+    const expiresAt = new Date(item.expiresAt).getTime();
+    const createdAt = new Date(item.createdAt).getTime();
+    let milliseconds = expiresAt - Date.now();
+    if (Number.isFinite(createdAt) && Number.isFinite(expiresAt) && expiresAt > createdAt) {
+      milliseconds = Math.min(milliseconds, expiresAt - createdAt);
+    }
+    milliseconds = Math.max(0, milliseconds);
+    const hours = Math.ceil(milliseconds / 3_600_000);
     if (hours < 24) return { text: `${hours} 小时后清理`, soon: true };
-    return { text: `${Math.ceil(hours / 24)} 天后清理`, soon: hours <= 48 };
+    return { text: `${Math.ceil(milliseconds / 86_400_000)} 天后清理`, soon: hours <= 48 };
   }
 
   function fileType(item) {
@@ -560,7 +566,7 @@
     const isText = item.kind === "text";
     const count = item.events.length;
     const statusText = count ? `已${isText ? "复制" : "下载"} ${count} 次` : `尚未${isText ? "使用" : "下载"}`;
-    const retention = remainingLabel(item.expiresAt);
+    const retention = remainingLabel(item);
     const kind = isText ? "文本" : `文件 · ${escapeHtml(fileType(item))}`;
     const expanded = expandedDetails.has(textKey(item));
     const icon = isText

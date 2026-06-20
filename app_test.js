@@ -10,6 +10,21 @@ const adminHtml = fs.readFileSync("admin.html", "utf8");
 const profileHtml = fs.readFileSync("profile.html", "utf8");
 const styles = fs.readFileSync("styles.css", "utf8");
 
+function relativeLuminance(hex) {
+  const normalized = hex.replace("#", "");
+  const channels = [0, 2, 4].map((offset) => parseInt(normalized.slice(offset, offset + 2), 16) / 255);
+  const linear = channels.map((channel) => (
+    channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  ));
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+function contrastRatio(foreground, background) {
+  const foregroundLuminance = relativeLuminance(foreground);
+  const backgroundLuminance = relativeLuminance(background);
+  return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
+}
+
 function response(status, payload) {
   return {
     ok: status >= 200 && status < 300,
@@ -77,6 +92,15 @@ function profileHarness(fetchImpl) {
 
 function shareHarness(fetchImpl, options = {}) {
   const listeners = {};
+  const TestDate = options.now ? class extends Date {
+    constructor(...args) {
+      super(...(args.length ? args : [options.now]));
+    }
+
+    static now() {
+      return new Date(options.now).getTime();
+    }
+  } : Date;
   function element(extra = {}) {
     return {
       hidden: false,
@@ -167,6 +191,7 @@ function shareHarness(fetchImpl, options = {}) {
   };
   const redirects = [];
   const context = {
+    Date: TestDate,
     Headers,
     FormData: class FormData {},
     XMLHttpRequest: class XMLHttpRequest {},
@@ -435,6 +460,46 @@ test("share page renders current user storage usage", async () => {
   assert.equal(harness.elements["#storage-quota"].textContent, "5 GB");
   assert.equal(harness.elements["#storage-percent"].textContent, "0.01%");
   assert.equal(harness.elements["#storage-bar"].style.width, "0.01%");
+});
+
+test("mobile share items cap initial expiry labels at configured retention days", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 42,
+          kind: "text",
+          text: "fresh note",
+          createdAt: "2026-06-21T10:00:30Z",
+          expiresAt: "2026-07-21T10:00:30Z",
+          uploaderDevice: "iPhone · Safari",
+          events: [],
+        }, {
+          id: 43,
+          kind: "file",
+          fileName: "fresh.png",
+          fileSize: 1024,
+          mimeType: "image/png",
+          createdAt: "2026-06-21T10:00:30Z",
+          expiresAt: "2026-06-28T10:00:30Z",
+          uploaderDevice: "iPhone · Safari",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  }, { mobile: true, now: "2026-06-21T10:00:00Z" });
+
+  await flushAsync();
+  await flushAsync();
+
+  const html = harness.elements["#item-list"].innerHTML;
+  assert.match(html, /30 天后清理/);
+  assert.match(html, /7 天后清理/);
+  assert.doesNotMatch(html, /31 天后清理|8 天后清理/);
 });
 
 test("share item blank area toggles details while history button toggles history", async () => {
@@ -739,6 +804,11 @@ test("share collapsed records use one-line previews and uniform height", () => {
   assert.match(styles, /\.text-preview \{[^}]*-webkit-line-clamp:\s*1/);
 });
 
+test("mobile collapsed records show metadata without vertical clipping", () => {
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta \{[^}]*height:\s*auto[^}]*flex-wrap:\s*wrap[^}]*overflow:\s*visible/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta > span \{[^}]*min-width:\s*0/);
+});
+
 test("app footers omit the device timezone note", () => {
   for (const html of [shareHtml, adminHtml, profileHtml]) {
     assert.equal(html.includes("所有时间按当前设备时区显示"), false);
@@ -755,6 +825,12 @@ test("mobile login uses the light login background only", () => {
   assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-body \{[^}]*background:\s*#eef3fb/);
   assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-shell \{[^}]*min-height:\s*100svh;[^}]*background:\s*#eef3fb/);
   assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-panel \{[^}]*background:\s*#eef3fb/);
+});
+
+test("mobile login secondary text keeps accessible contrast", () => {
+  const mobileLoginTextColor = "#536077";
+  assert.ok(contrastRatio(mobileLoginTextColor, "#eef3fb") >= 4.5);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-card-heading > p:last-child,\s*\.login-footer \{[^}]*color:\s*#536077/);
 });
 
 test("admin users render storage quota and used space", async () => {
