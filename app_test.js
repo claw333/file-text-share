@@ -4,6 +4,8 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync("app.js", "utf8");
+const shareHtml = fs.readFileSync("share.html", "utf8");
+const styles = fs.readFileSync("styles.css", "utf8");
 
 function response(status, payload) {
   return {
@@ -409,6 +411,14 @@ test("share page renders current user storage usage", async () => {
   assert.equal(harness.elements["#storage-quota"].textContent, "5 GB");
   assert.equal(harness.elements["#storage-percent"].textContent, "0.01%");
   assert.equal(harness.elements["#storage-bar"].style.width, "0.01%");
+});
+
+test("share storage summary keeps desktop labels unwrapped and spaced", () => {
+  assert.match(shareHtml, /class="storage-copy"/);
+  assert.match(shareHtml, /<\/strong>\s+<small><span id="storage-percent"/);
+  assert.match(styles, /\.retention-summary small \{[^}]*white-space:\s*nowrap/);
+  assert.match(styles, /\.retention-summary > div:not\(\.storage-summary\) \{[^}]*flex:\s*0 0 auto/);
+  assert.match(styles, /\.storage-copy \{[^}]*gap:\s*0 8px/);
 });
 
 test("admin users render storage quota and used space", async () => {

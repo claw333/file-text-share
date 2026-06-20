@@ -230,17 +230,19 @@ a { color: inherit; text-decoration: none; }
 .welcome-row h1 { margin: 0 0 8px; font-size: clamp(30px, 4vw, 43px); font-weight: 650; line-height: 1.15; letter-spacing: -0.035em; }
 .welcome-row h1 span { color: var(--blue); }
 .welcome-row > div:first-child > p:last-child { margin: 0; color: var(--muted); font-size: 15px; }
-.retention-summary { display: flex; flex: 0 0 auto; gap: 20px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, 0.62); }
+.retention-summary { display: flex; flex: 0 0 auto; align-items: center; gap: 20px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, 0.62); }
 .retention-summary > div { display: flex; align-items: center; gap: 9px; }
+.retention-summary > div:not(.storage-summary) { flex: 0 0 auto; }
 .retention-summary > div + div { padding-left: 20px; border-left: 1px solid var(--line); }
-.retention-summary > div > span:last-child { display: grid; line-height: 1.2; }
+.retention-summary > div > span:last-child { display: grid; min-width: 0; line-height: 1.2; }
 .retention-summary strong { font-size: 12px; }
-.retention-summary small { margin-top: 4px; color: var(--faint); font-size: 10px; }
+.retention-summary small { margin-top: 4px; color: var(--faint); font-size: 10px; white-space: nowrap; }
 .summary-icon { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 9px; font-size: 13px; font-weight: 750; }
 .summary-icon svg { width: 17px; height: 17px; }
 .retention-summary > div.storage-summary { display: grid; flex: 1 1 230px; grid-template-columns: 32px minmax(0, 1fr); gap: 7px 9px; }
-.storage-summary > span:nth-child(2) { min-width: 0; }
-.storage-summary strong { overflow-wrap: anywhere; }
+.storage-copy { display: flex; min-width: 0; align-items: baseline; flex-wrap: wrap; gap: 0 8px; line-height: 1.2; }
+.storage-copy strong { white-space: nowrap; }
+.storage-copy small { margin-top: 0; }
 .storage-icon { color: var(--navy-deep); background: var(--orange-soft); }
 .storage-meter { display: block; grid-column: 2; height: 6px; overflow: hidden; border-radius: 999px; background: var(--blue-soft); }
 .storage-meter span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--teal-dark); transition: width 160ms ease; }
@@ -412,6 +414,7 @@ a { color: inherit; text-decoration: none; }
   .welcome-row h1 { font-size: 31px; }
   .retention-summary { flex-wrap: wrap; margin-top: 22px; justify-content: space-between; }
   .retention-summary > div { flex: 1; }
+  .retention-summary > div:not(.storage-summary) { flex: 1 1 0; }
   .retention-summary > div + div { padding-left: 14px; }
   .retention-summary > div.storage-summary { flex: 1 0 100%; padding-top: 12px; padding-left: 0; border-top: 1px solid var(--line); border-left: 0; }
   .composer-card { padding: 18px; }
