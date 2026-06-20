@@ -4,7 +4,10 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync("app.js", "utf8");
+const indexHtml = fs.readFileSync("index.html", "utf8");
 const shareHtml = fs.readFileSync("share.html", "utf8");
+const adminHtml = fs.readFileSync("admin.html", "utf8");
+const profileHtml = fs.readFileSync("profile.html", "utf8");
 const styles = fs.readFileSync("styles.css", "utf8");
 
 function response(status, payload) {
@@ -485,6 +488,24 @@ test("share storage summary keeps desktop labels unwrapped and spaced", () => {
   assert.match(styles, /\.retention-summary small \{[^}]*white-space:\s*nowrap/);
   assert.match(styles, /\.retention-summary > div:not\(\.storage-summary\) \{[^}]*flex:\s*0 0 auto/);
   assert.match(styles, /\.storage-copy \{[^}]*gap:\s*0 8px/);
+});
+
+test("app footers omit the device timezone note", () => {
+  for (const html of [shareHtml, adminHtml, profileHtml]) {
+    assert.equal(html.includes("所有时间按当前设备时区显示"), false);
+    assert.equal(html.includes("当前设备时区"), false);
+    assert.equal(html.includes("精确到秒"), false);
+    assert.equal(html.includes("<p><span></span>"), false);
+  }
+  assert.match(styles, /\.app-footer \{[^}]*justify-content:\s*flex-end/);
+  assert.doesNotMatch(styles, /\.app-footer p:first-child/);
+});
+
+test("mobile login uses the light login background only", () => {
+  assert.match(indexHtml, /<meta name="theme-color" content="#eef3fb" \/>/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-body \{[^}]*background:\s*#eef3fb/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-shell \{[^}]*min-height:\s*100svh;[^}]*background:\s*#eef3fb/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-panel \{[^}]*background:\s*#eef3fb/);
 });
 
 test("admin users render storage quota and used space", async () => {
