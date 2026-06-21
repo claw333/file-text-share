@@ -519,7 +519,7 @@
   }
 
   function fileDetailType(item) {
-    const mimeType = String(item.mimeType || "").trim().toLowerCase();
+    const mimeType = String(item.mimeType || "").split(";")[0].trim().toLowerCase();
     const subtype = mimeType.includes("/") ? mimeType.split("/").pop() : mimeType;
     const cleaned = subtype.replace(/^x-/, "").replace(/[^a-z0-9.+-]/g, "");
     return cleaned || fileType(item).toLowerCase();

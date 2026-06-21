@@ -736,6 +736,16 @@ test("share file details render generic and image thumbnails", async () => {
           expiresAt: "2026-06-14T08:30:00Z",
           uploaderDevice: "browser",
           events: [],
+        }, {
+          id: 9,
+          kind: "file",
+          fileName: "notes.txt",
+          fileSize: 41,
+          mimeType: "text/plain; charset=utf-8",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
         }],
       });
     }
@@ -754,7 +764,9 @@ test("share file details render generic and image thumbnails", async () => {
   assert.match(html, /src="\/api\/files\/8\/preview"/);
   assert.match(html, /aria-label="放大图片 photo\.png"/);
   assert.match(html, />128 B · png<\/span>/);
+  assert.match(html, />41 B · plain<\/span>/);
   assert.doesNotMatch(html, /image\/png/);
+  assert.doesNotMatch(html, /plaincharset/);
 });
 
 test("share records omit usage status chips and normalize source labels", async () => {
