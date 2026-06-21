@@ -1149,6 +1149,151 @@ func TestFileUploadRejectsUserQuotaExceeded(t *testing.T) {
 	}
 }
 
+func TestFileUploadDoesNotWriteBeyondRemainingQuota(t *testing.T) {
+	app := newTestApp(t)
+	cookie, csrf := app.login(t)
+	const quotaBytes int64 = 1
+	if err := app.db.setUserStorageQuota(context.Background(), app.userID, quotaBytes, app.server.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	bodyReader, bodyWriter := io.Pipe()
+	defer bodyReader.Close()
+	multipartWriter := multipart.NewWriter(bodyWriter)
+	request := httptest.NewRequest(http.MethodPost, "/api/files", bodyReader)
+	request.AddCookie(cookie)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	request.Header.Set("X-CSRF-Token", csrf)
+	response := httptest.NewRecorder()
+
+	handlerDone := make(chan struct{})
+	go func() {
+		app.handler.ServeHTTP(response, request)
+		close(handlerDone)
+	}()
+
+	releaseUpload := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		defer bodyWriter.Close()
+		part, err := multipartWriter.CreateFormFile("file", "over-quota.bin")
+		if err != nil {
+			writerDone <- err
+			return
+		}
+		if _, err := part.Write(bytes.Repeat([]byte("x"), 64*1024)); err != nil {
+			writerDone <- err
+			return
+		}
+		<-releaseUpload
+		writerDone <- multipartWriter.Close()
+	}()
+
+	released := false
+	release := func() {
+		if !released {
+			close(releaseUpload)
+			released = true
+		}
+	}
+	defer release()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case <-handlerDone:
+			release()
+			if response.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("upload over quota status = %d, want %d; body = %s", response.Code, http.StatusRequestEntityTooLarge, response.Body.String())
+			}
+			return
+		case err := <-writerDone:
+			if err != nil && !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatal(err)
+			}
+		case <-ticker.C:
+			if size := maxUploadDirectoryEntrySize(t, app.server.cfg.uploadDir); size > quotaBytes {
+				release()
+				waitForHandler(t, handlerDone)
+				t.Fatalf("temporary upload bytes before quota rejection = %d, want <= %d", size, quotaBytes)
+			}
+		case <-deadline:
+			release()
+			waitForHandler(t, handlerDone)
+			if response.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("upload over quota status = %d, want %d; body = %s", response.Code, http.StatusRequestEntityTooLarge, response.Body.String())
+			}
+			if size := maxUploadDirectoryEntrySize(t, app.server.cfg.uploadDir); size != 0 {
+				t.Fatalf("upload directory bytes after rejected upload = %d, want 0", size)
+			}
+			return
+		}
+	}
+}
+
+func TestFileUploadQuotaReservationCountsInFlightUploads(t *testing.T) {
+	app := newTestApp(t)
+	const quotaBytes int64 = 5
+	if err := app.db.setUserStorageQuota(context.Background(), app.userID, quotaBytes, app.server.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	limit, release, err := app.server.reserveFileUploadQuota(context.Background(), app.userID, app.server.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limit != quotaBytes {
+		t.Fatalf("first reservation = %d, want %d", limit, quotaBytes)
+	}
+	_, _, err = app.server.reserveFileUploadQuota(context.Background(), app.userID, app.server.now())
+	if !errors.Is(err, errUserFileQuotaExceeded) {
+		t.Fatalf("second reservation error = %v, want %v", err, errUserFileQuotaExceeded)
+	}
+
+	release()
+	limit, release, err = app.server.reserveFileUploadQuota(context.Background(), app.userID, app.server.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if limit != quotaBytes {
+		t.Fatalf("reservation after release = %d, want %d", limit, quotaBytes)
+	}
+}
+
+func maxUploadDirectoryEntrySize(t *testing.T, directory string) int64 {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var maxSize int64
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Size() > maxSize {
+			maxSize = info.Size()
+		}
+	}
+	return maxSize
+}
+
+func waitForHandler(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for upload handler")
+	}
+}
+
 func TestFileDownloadRangeSkipsDownloadEvent(t *testing.T) {
 	app := newTestApp(t)
 	cookie, csrf := app.login(t)

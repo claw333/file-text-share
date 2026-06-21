@@ -1038,7 +1038,8 @@ test("docker build context includes embedded favicon asset", () => {
 });
 
 test("landing login page omits footer security text and feature badges", () => {
-  assert.equal(indexHtml.includes("登录后在你的设备之间共享内容。"), true);
+  assert.equal(indexHtml.includes("登录后在你的设备之间共享内容，过期自动清理。"), true);
+  assert.equal(indexHtml.includes("登录后在你的设备之间共享内容。"), false);
   assert.equal(indexHtml.includes("登录后在你的设备之间短暂停靠"), false);
   assert.equal(indexHtml.includes("连接已受保护"), false);
   assert.equal(indexHtml.includes("服务端会话"), false);

@@ -56,16 +56,20 @@ type server struct {
 	attempts  map[string]loginAttempt
 	ticketMu  sync.Mutex
 	tickets   map[string]downloadTicket
+
+	uploadQuotaMu       sync.Mutex
+	uploadQuotaReserved map[int64]int64
 }
 
 func newServer(cfg config, db *database, logger *slog.Logger) *server {
 	return &server{
-		cfg:      cfg,
-		db:       db,
-		logger:   logger,
-		now:      func() time.Time { return time.Now().UTC().Truncate(time.Second) },
-		attempts: make(map[string]loginAttempt),
-		tickets:  make(map[string]downloadTicket),
+		cfg:                 cfg,
+		db:                  db,
+		logger:              logger,
+		now:                 func() time.Time { return time.Now().UTC().Truncate(time.Second) },
+		attempts:            make(map[string]loginAttempt),
+		tickets:             make(map[string]downloadTicket),
+		uploadQuotaReserved: make(map[int64]int64),
 	}
 }
 
@@ -662,13 +666,24 @@ func (s *server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请选择一个文件")
 		return
 	}
-	defer part.Close()
-
 	originalName := filepath.Base(strings.ReplaceAll(part.FileName(), "\\", "/"))
 	if originalName == "." || originalName == "" || utf8.RuneCountInString(originalName) > 255 {
 		writeError(w, http.StatusBadRequest, "无效的文件名")
 		return
 	}
+	sess := sessionFromContext(r.Context())
+	uploadLimit, releaseQuota, err := s.reserveFileUploadQuota(r.Context(), sess.UserID, s.now())
+	if err != nil {
+		if errors.Is(err, errUserFileQuotaExceeded) {
+			writeError(w, http.StatusRequestEntityTooLarge, "文件存储空间已达上限，请删除旧文件后再试")
+			return
+		}
+		s.logger.Error("reserve upload quota", "error", err)
+		writeError(w, http.StatusInternalServerError, "上传失败")
+		return
+	}
+	defer releaseQuota()
+
 	storedName, err := randomID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "上传失败")
@@ -688,13 +703,17 @@ func (s *server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	written, err := io.Copy(temp, io.LimitReader(part, maxFileBytes+1))
+	written, overLimit, err := copyUploadWithinLimit(temp, part, uploadLimit)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "文件上传中断")
 		return
 	}
-	if written > maxFileBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "单个文件不能超过 1 GB")
+	if overLimit {
+		if uploadLimit == maxFileBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "单个文件不能超过 1 GB")
+			return
+		}
+		writeError(w, http.StatusRequestEntityTooLarge, "文件存储空间已达上限，请删除旧文件后再试")
 		return
 	}
 	if err := temp.Sync(); err != nil || temp.Close() != nil {
@@ -710,7 +729,6 @@ func (s *server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	tempPath = finalPath
 
 	mimeType := detectMIMEType(finalPath)
-	sess := sessionFromContext(r.Context())
 	id, err := s.db.createFile(r.Context(), fileRecord{
 		UserID:     sess.UserID,
 		StoredName: storedName,
@@ -729,6 +747,68 @@ func (s *server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	committed = true
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+func (s *server) reserveFileUploadQuota(ctx context.Context, userID int64, now time.Time) (int64, func(), error) {
+	s.uploadQuotaMu.Lock()
+	defer s.uploadQuotaMu.Unlock()
+
+	quotaBytes, usedBytes, err := userStorageQuotaAndUsage(ctx, s.db.db, userID, now)
+	if err != nil {
+		return 0, func() {}, err
+	}
+	remainingBytes := quotaBytes - usedBytes - s.uploadQuotaReserved[userID]
+	if remainingBytes <= 0 {
+		return 0, func() {}, errUserFileQuotaExceeded
+	}
+	uploadLimit := remainingBytes
+	if uploadLimit > maxFileBytes {
+		uploadLimit = maxFileBytes
+	}
+	s.uploadQuotaReserved[userID] += uploadLimit
+	return uploadLimit, func() {
+		s.releaseFileUploadQuota(userID, uploadLimit)
+	}, nil
+}
+
+func (s *server) releaseFileUploadQuota(userID, reservedBytes int64) {
+	s.uploadQuotaMu.Lock()
+	defer s.uploadQuotaMu.Unlock()
+
+	nextReserved := s.uploadQuotaReserved[userID] - reservedBytes
+	if nextReserved <= 0 {
+		delete(s.uploadQuotaReserved, userID)
+		return
+	}
+	s.uploadQuotaReserved[userID] = nextReserved
+}
+
+func copyUploadWithinLimit(dst io.Writer, src io.Reader, limit int64) (int64, bool, error) {
+	written, err := io.Copy(dst, io.LimitReader(src, limit))
+	if err != nil {
+		return written, false, err
+	}
+	if written < limit {
+		return written, false, nil
+	}
+	overLimit, err := readerHasMore(src)
+	return written, overLimit, err
+}
+
+func readerHasMore(src io.Reader) (bool, error) {
+	var extra [1]byte
+	for {
+		n, err := src.Read(extra[:])
+		if n > 0 {
+			return true, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 }
 
 func detectMIMEType(path string) string {
