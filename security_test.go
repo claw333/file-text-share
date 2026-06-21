@@ -40,7 +40,7 @@ func TestHashAndVerifyPassword(t *testing.T) {
 
 func TestSimplifyUserAgent(t *testing.T) {
 	userAgent := "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
-	if got, want := simplifyUserAgent(userAgent), "iPhone · Safari · iOS"; got != want {
+	if got, want := simplifyUserAgent(userAgent), "iOS · Safari"; got != want {
 		t.Fatalf("simplifyUserAgent() = %q, want %q", got, want)
 	}
 }

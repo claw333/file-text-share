@@ -142,23 +142,22 @@ func tokenHash(token string) string {
 
 func simplifyUserAgent(userAgent string) string {
 	ua := strings.ToLower(userAgent)
-	device := "电脑"
 	browser := "浏览器"
 	system := "未知系统"
 
 	switch {
 	case strings.Contains(ua, "iphone"):
-		device, system = "iPhone", "iOS"
+		system = "iOS"
 	case strings.Contains(ua, "ipad"):
-		device, system = "iPad", "iOS"
+		system = "iOS"
 	case strings.Contains(ua, "android"):
-		device, system = "Android", "Android"
+		system = "Android"
 	case strings.Contains(ua, "macintosh") || strings.Contains(ua, "mac os x"):
-		device, system = "Mac", "macOS"
+		system = "macOS"
 	case strings.Contains(ua, "windows"):
-		device, system = "Windows PC", "Windows"
+		system = "Windows"
 	case strings.Contains(ua, "linux"):
-		device, system = "Linux PC", "Linux"
+		system = "Linux"
 	}
 
 	switch {
@@ -172,7 +171,7 @@ func simplifyUserAgent(userAgent string) string {
 		browser = "Safari"
 	}
 
-	return strings.Join([]string{device, browser, system}, " · ")
+	return strings.Join([]string{system, browser}, " · ")
 }
 
 func parsePositiveID(value string) (int64, error) {

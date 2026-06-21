@@ -9,6 +9,7 @@ const shareHtml = fs.readFileSync("share.html", "utf8");
 const adminHtml = fs.readFileSync("admin.html", "utf8");
 const profileHtml = fs.readFileSync("profile.html", "utf8");
 const styles = fs.readFileSync("styles.css", "utf8");
+const favicon = fs.readFileSync("favicon.png");
 
 function relativeLuminance(hex) {
   const normalized = hex.replace("#", "");
@@ -740,6 +741,50 @@ test("share file details render generic and image thumbnails", async () => {
   assert.match(html, /aria-label="放大图片 photo\.png"/);
 });
 
+test("share records omit usage status chips and normalize source labels", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 11,
+          kind: "text",
+          text: "轻递文本",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "iPhone · Safari · iOS",
+          events: [{ eventType: "copy", deviceLabel: "Windows PC · Chrome · Windows", createdAt: "2026-06-13T09:00:00Z" }],
+        }, {
+          id: 12,
+          kind: "file",
+          fileName: "report.pdf",
+          fileSize: 42,
+          mimeType: "application/pdf",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "Windows PC · Chrome · Windows",
+          events: [{ eventType: "download", deviceLabel: "iPhone · Safari · iOS", createdAt: "2026-06-13T09:00:00Z" }],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  }, { mobile: true });
+
+  await flushAsync();
+  await flushAsync();
+
+  const html = harness.elements["#item-list"].innerHTML;
+  assert.doesNotMatch(html, /尚未使用|尚未下载|已复制\s+\d+\s+次|已下载\s+\d+\s+次/);
+  assert.doesNotMatch(html, /class="status-chip/);
+  assert.match(html, /<div class="item-meta"><span>4 字<\/span>/);
+  assert.match(html, /<div class="item-meta"><span>42 B<\/span>/);
+  assert.match(html, />iOS · Safari<\/span>/);
+  assert.match(html, />Windows · Chrome<\/span>/);
+  assert.doesNotMatch(html, /iPhone · Safari · iOS|Windows PC · Chrome · Windows/);
+});
+
 test("share image thumbnail opens preview modal", async () => {
   const harness = shareHarness(async (path) => {
     if (path === "/api/session") {
@@ -805,8 +850,15 @@ test("share collapsed records use one-line previews and uniform height", () => {
 });
 
 test("mobile collapsed records show metadata without vertical clipping", () => {
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta \{[^}]*height:\s*auto[^}]*flex-wrap:\s*wrap[^}]*overflow:\s*visible/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta \{[^}]*display:\s*grid[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)[^}]*overflow:\s*visible/);
   assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta > span \{[^}]*min-width:\s*0/);
+});
+
+test("composer text input matches the file drop zone height", () => {
+  assert.match(styles, /\.text-composer textarea \{[^}]*height:\s*166px/);
+  assert.match(styles, /\.drop-zone \{[^}]*height:\s*166px/);
+  assert.doesNotMatch(styles, /@media \(max-width: 960px\) \{[\s\S]*?\.text-composer textarea \{[^}]*height:\s*140px/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.text-composer textarea,\s*\.drop-zone \{[^}]*height:\s*140px/);
 });
 
 test("app footers omit the device timezone note", () => {
@@ -816,8 +868,10 @@ test("app footers omit the device timezone note", () => {
     assert.equal(html.includes("精确到秒"), false);
     assert.equal(html.includes("<p><span></span>"), false);
   }
-  assert.match(styles, /\.app-footer \{[^}]*justify-content:\s*flex-end/);
+  assert.match(styles, /\.app-footer \{[^}]*justify-content:\s*flex-start/);
+  assert.match(styles, /\.app-footer \{[^}]*text-align:\s*left/);
   assert.doesNotMatch(styles, /\.app-footer p:first-child/);
+  assert.doesNotMatch(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.app-footer \{[^}]*text-align:\s*center/);
 });
 
 test("mobile login uses the light login background only", () => {
@@ -827,10 +881,36 @@ test("mobile login uses the light login background only", () => {
   assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-panel \{[^}]*background:\s*#eef3fb/);
 });
 
+test("all pages reference the project favicon", () => {
+  assert.ok(favicon.length > 0);
+  for (const html of [indexHtml, shareHtml, adminHtml, profileHtml]) {
+    assert.match(html, /<link rel="icon" type="image\/png" href="favicon\.png" \/>/);
+  }
+});
+
+test("landing login page omits footer security text and feature badges", () => {
+  assert.equal(indexHtml.includes("登录后在你的设备之间共享内容。"), true);
+  assert.equal(indexHtml.includes("登录后在你的设备之间短暂停靠"), false);
+  assert.equal(indexHtml.includes("连接已受保护"), false);
+  assert.equal(indexHtml.includes("服务端会话"), false);
+  assert.doesNotMatch(indexHtml, /<span>HTTPS<\/span>|<span>自动清理<\/span>/);
+  assert.doesNotMatch(indexHtml, /class="login-badges"/);
+  assert.doesNotMatch(styles, /\.login-badges/);
+  assert.doesNotMatch(styles, /\.login-footer/);
+});
+
 test("mobile login secondary text keeps accessible contrast", () => {
   const mobileLoginTextColor = "#536077";
   assert.ok(contrastRatio(mobileLoginTextColor, "#eef3fb") >= 4.5);
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-card-heading > p:last-child,\s*\.login-footer \{[^}]*color:\s*#536077/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-card-heading > p:last-child \{[^}]*color:\s*#536077/);
+});
+
+test("mobile admin quota and password controls use separate aligned rows", () => {
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.admin-user-actions \{[^}]*display:\s*grid[^}]*grid-template-columns:\s*1fr auto/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.admin-quota-control,\s*\.admin-password-reset \{[^}]*grid-column:\s*1 \/ -1[^}]*display:\s*grid/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.admin-quota-control \{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto auto/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.admin-password-reset \{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.admin-save-quota,\s*\.admin-reset-password \{[^}]*white-space:\s*nowrap/);
 });
 
 test("admin users render storage quota and used space", async () => {

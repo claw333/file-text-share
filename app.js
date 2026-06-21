@@ -457,6 +457,27 @@
     return `${value} B`;
   }
 
+  function formatTextLength(value) {
+    return `${Array.from(String(value || "")).length} 字`;
+  }
+
+  function sourceLabel(value) {
+    const parts = String(value || "").split("·").map(function (part) { return part.trim(); }).filter(Boolean);
+    if (parts.length >= 3) return `${parts[parts.length - 1]} · ${parts[parts.length - 2]}`;
+    if (parts.length === 2) {
+      const systemByDevice = {
+        "iPhone": "iOS",
+        "iPad": "iOS",
+        "Android": "Android",
+        "Mac": "macOS",
+        "Windows PC": "Windows",
+        "Linux PC": "Linux",
+      };
+      return `${systemByDevice[parts[0]] || parts[0]} · ${parts[1]}`;
+    }
+    return parts[0] || "未知系统 · 浏览器";
+  }
+
   function formatNumber(value, digits) {
     return value.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*[1-9])0+$/, "$1");
   }
@@ -521,7 +542,7 @@
     }
     const rows = item.events.map(function (event) {
       const action = event.eventType === "copy" ? "复制成功" : "下载完成";
-      return `<li><span class="history-device"><i></i><span><strong>${escapeHtml(event.deviceLabel)}</strong><small>${formatTime(event.createdAt)} · ${action}</small></span></span></li>`;
+      return `<li><span class="history-device"><i></i><span><strong>${escapeHtml(sourceLabel(event.deviceLabel))}</strong><small>${formatTime(event.createdAt)} · ${action}</small></span></span></li>`;
     }).join("");
     return `<div class="history-panel" hidden><div class="history-title"><strong>${isText ? "使用" : "下载"}记录</strong><span>共 ${item.events.length} 次</span></div><ol>${rows}</ol></div>`;
   }
@@ -564,8 +585,6 @@
 
   function renderItem(item) {
     const isText = item.kind === "text";
-    const count = item.events.length;
-    const statusText = count ? `已${isText ? "复制" : "下载"} ${count} 次` : `尚未${isText ? "使用" : "下载"}`;
     const retention = remainingLabel(item);
     const kind = isText ? "文本" : `文件 · ${escapeHtml(fileType(item))}`;
     const expanded = expandedDetails.has(textKey(item));
@@ -575,18 +594,18 @@
     const content = isText
       ? textDetailMarkup(item, expanded)
       : `<p class="file-name">${escapeHtml(item.fileName)}</p>${fileDetailMarkup(item, expanded)}`;
-    const size = isText ? "" : `<span>${formatSize(item.fileSize)}</span>`;
+    const size = `<span>${isText ? formatTextLength(item.text) : formatSize(item.fileSize)}</span>`;
     const primary = isText
       ? '<button class="button button-soft action-copy" type="button"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>复制</button>'
       : '<button class="button button-soft action-download" type="button"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>下载</button>';
 
     return `<article class="share-item${retention.soon ? " expiring-item" : ""}${expanded ? " is-expanded" : ""}" data-kind="${item.kind}" data-item-id="${item.id}" aria-expanded="${expanded}">
       <div class="item-main">${icon}<div class="item-content">
-        <div class="item-topline"><span class="kind-label">${kind}</span><span class="status-chip ${count ? "status-used" : "status-new"}"><span></span>${statusText}</span></div>
+        <div class="item-topline"><span class="kind-label">${kind}</span></div>
         ${content}
         <div class="item-meta">${size}
           <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>${formatTime(item.createdAt)}</span>
-          <span><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2" /><path d="M8 21h8M12 18v3" /></svg>${escapeHtml(item.uploaderDevice)}</span>
+          <span><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2" /><path d="M8 21h8M12 18v3" /></svg>${escapeHtml(sourceLabel(item.uploaderDevice))}</span>
           <span class="expiry${retention.soon ? " expiry-soon" : ""}"><svg viewBox="0 0 24 24"><path d="M6 8h12M9 3v3M15 3v3M5 5h14v16H5z" /></svg>${retention.text}</span>
         </div>${historyMarkup(item)}
       </div></div>

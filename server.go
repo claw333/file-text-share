@@ -23,7 +23,7 @@ import (
 	"unicode/utf8"
 )
 
-//go:embed index.html share.html admin.html profile.html styles.css app.js
+//go:embed index.html share.html admin.html profile.html styles.css app.js favicon.png
 var staticFiles embed.FS
 
 const (
@@ -79,6 +79,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /profile.html", s.handleProfilePage)
 	mux.HandleFunc("GET /styles.css", s.serveStatic("styles.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /app.js", s.serveStatic("app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /favicon.png", s.serveStatic("favicon.png", "image/png"))
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("GET /api/session", s.withSession(s.handleSession))
 	mux.HandleFunc("POST /api/logout", s.withSession(s.withCSRF(s.handleLogout)))

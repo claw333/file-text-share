@@ -930,7 +930,7 @@ func TestHealthAndSecurityHeaders(t *testing.T) {
 func TestStaticAssetsUseGzipWhenAccepted(t *testing.T) {
 	app := newTestApp(t)
 	for _, acceptEncoding := range []string{"gzip", "br, gzip;q=0.5"} {
-		for _, path := range []string{"/", "/styles.css", "/app.js"} {
+		for _, path := range []string{"/", "/styles.css", "/app.js", "/favicon.png"} {
 			request := httptest.NewRequest(http.MethodGet, path, nil)
 			request.Header.Set("Accept-Encoding", acceptEncoding)
 			response := httptest.NewRecorder()
@@ -959,6 +959,20 @@ func TestStaticAssetsUseGzipWhenAccepted(t *testing.T) {
 				t.Fatalf("%s gzip body is empty", path)
 			}
 		}
+	}
+}
+
+func TestFaviconServesPNG(t *testing.T) {
+	app := newTestApp(t)
+	response := performRequest(app.handler, http.MethodGet, "/favicon.png", nil, nil, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("favicon status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "image/png" {
+		t.Fatalf("favicon Content-Type = %q, want image/png", contentType)
+	}
+	if body := response.Body.Bytes(); len(body) < 8 || !bytes.Equal(body[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		t.Fatal("favicon body does not start with a PNG signature")
 	}
 }
 
