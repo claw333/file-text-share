@@ -518,6 +518,13 @@
     return parts.length > 1 ? parts.pop().slice(0, 6).toUpperCase() : "FILE";
   }
 
+  function fileDetailType(item) {
+    const mimeType = String(item.mimeType || "").trim().toLowerCase();
+    const subtype = mimeType.includes("/") ? mimeType.split("/").pop() : mimeType;
+    const cleaned = subtype.replace(/^x-/, "").replace(/[^a-z0-9.+-]/g, "");
+    return cleaned || fileType(item).toLowerCase();
+  }
+
   function greeting() {
     const hour = new Date().getHours();
     if (hour < 6) return "夜深了";
@@ -565,10 +572,11 @@
     const type = escapeHtml(fileType(item));
     const fileName = escapeHtml(item.fileName);
     const safeName = escapeAttribute(item.fileName);
-    const mimeType = item.mimeType ? escapeHtml(item.mimeType) : "未知类型";
+    const detailType = escapeHtml(fileDetailType(item));
     const preview = isImageFile(item)
-      ? `<button class="file-thumbnail image-thumbnail" type="button" aria-label="放大图片 ${safeName}">
+      ? `<button class="file-thumbnail image-thumbnail is-loading" type="button" data-loading="true" aria-disabled="true" aria-label="放大图片 ${safeName}">
           <img src="/api/files/${item.id}/preview" alt="${safeName} 缩略图" loading="lazy" />
+          <span class="thumbnail-spinner" aria-hidden="true"></span>
         </button>`
       : `<div class="file-thumbnail generic-thumbnail" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6zM14 2v5h5M9 13h6M9 17h6" /></svg>
@@ -578,7 +586,7 @@
           ${preview}
           <div class="file-detail-copy">
             <strong>${fileName}</strong>
-            <span>${formatSize(item.fileSize)} · ${mimeType}</span>
+            <span>${formatSize(item.fileSize)} · ${detailType}</span>
           </div>
         </div>`;
   }
@@ -603,10 +611,10 @@
       <div class="item-main">${icon}<div class="item-content">
         <div class="item-topline"><span class="kind-label">${kind}</span></div>
         ${content}
-        <div class="item-meta">${size}
-          <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>${formatTime(item.createdAt)}</span>
-          <span><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2" /><path d="M8 21h8M12 18v3" /></svg>${escapeHtml(sourceLabel(item.uploaderDevice))}</span>
-          <span class="expiry${retention.soon ? " expiry-soon" : ""}"><svg viewBox="0 0 24 24"><path d="M6 8h12M9 3v3M15 3v3M5 5h14v16H5z" /></svg>${retention.text}</span>
+        <div class="item-meta"><span class="meta-line">${size}
+          <span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>${formatTime(item.createdAt)}</span></span>
+          <span class="meta-line"><span><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="13" rx="2" /><path d="M8 21h8M12 18v3" /></svg>${escapeHtml(sourceLabel(item.uploaderDevice))}</span>
+          <span class="expiry${retention.soon ? " expiry-soon" : ""}"><svg viewBox="0 0 24 24"><path d="M6 8h12M9 3v3M15 3v3M5 5h14v16H5z" /></svg>${retention.text}</span></span>
         </div>${historyMarkup(item)}
       </div></div>
       <div class="item-actions">${primary}
@@ -620,6 +628,7 @@
     itemList.innerHTML = visible.map(renderItem).join("");
     document.querySelector("#all-count").textContent = items.length;
     emptyState.hidden = visible.length !== 0;
+    refreshImageThumbnailStates();
   }
 
   async function loadItems() {
@@ -733,6 +742,31 @@
     if (modal.hidden) document.body.style.overflow = "";
   }
 
+  function setImageThumbnailLoading(button, loading) {
+    if (!button) return;
+    if (button.dataset) button.dataset.loading = loading ? "true" : "false";
+    if (button.classList) button.classList.toggle("is-loading", loading);
+    if (typeof button.setAttribute === "function") button.setAttribute("aria-disabled", String(loading));
+  }
+
+  function refreshImageThumbnailStates() {
+    if (typeof itemList.querySelectorAll !== "function") return;
+    itemList.querySelectorAll(".image-thumbnail img").forEach(function (image) {
+      const button = image.closest(".image-thumbnail");
+      const loaded = image.complete && image.naturalWidth > 0;
+      setImageThumbnailLoading(button, !loaded);
+    });
+  }
+
+  function thumbnailIsLoading(button) {
+    const image = typeof button.querySelector === "function" ? button.querySelector("img") : null;
+    if (image && image.complete && image.naturalWidth > 0) {
+      setImageThumbnailLoading(button, false);
+      return false;
+    }
+    return Boolean(button.dataset && button.dataset.loading === "true");
+  }
+
   itemList.addEventListener("click", async function (event) {
     const card = event.target.closest(".share-item");
     if (!card) return;
@@ -746,6 +780,10 @@
 
     try {
       if (imageButton) {
+        if (thumbnailIsLoading(imageButton)) {
+          showToast("正在下载，请稍后");
+          return;
+        }
         openImagePreview(item);
         return;
       }
@@ -787,7 +825,17 @@
   modal.querySelector(".modal-cancel").addEventListener("click", closeModal);
   modal.addEventListener("click", function (event) { if (event.target === modal) closeModal(); });
   imagePreviewModal.querySelector(".image-preview-close").addEventListener("click", closeImagePreview);
-  imagePreviewModal.addEventListener("click", function (event) { if (event.target === imagePreviewModal) closeImagePreview(); });
+  imagePreviewModal.addEventListener("click", closeImagePreview);
+  itemList.addEventListener("load", function (event) {
+    if (event.target.matches(".image-thumbnail img")) {
+      setImageThumbnailLoading(event.target.closest(".image-thumbnail"), false);
+    }
+  }, true);
+  itemList.addEventListener("error", function (event) {
+    if (event.target.matches(".image-thumbnail img")) {
+      setImageThumbnailLoading(event.target.closest(".image-thumbnail"), true);
+    }
+  }, true);
   document.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") return;
     if (!imagePreviewModal.hidden) closeImagePreview();

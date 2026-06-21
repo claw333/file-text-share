@@ -110,12 +110,20 @@ function shareHarness(fetchImpl, options = {}) {
       value: "",
       disabled: false,
       files: [],
+      attrs: {},
       dataset: {},
       style: {},
       classList: {
         add() {},
         remove() {},
         toggle() {},
+      },
+      setAttribute(name, value) {
+        this.attrs[name] = value;
+      },
+      removeAttribute(name) {
+        delete this.attrs[name];
+        delete this[name];
       },
       addEventListener(type, handler) {
         listeners[type] = handler;
@@ -148,6 +156,9 @@ function shareHarness(fetchImpl, options = {}) {
   });
   const imagePreviewModal = element({
     hidden: true,
+    addEventListener(type, handler) {
+      listeners[`image-preview-modal:${type}`] = handler;
+    },
     querySelector(selector) {
       return elements[selector] || null;
     },
@@ -737,9 +748,13 @@ test("share file details render generic and image thumbnails", async () => {
   const html = harness.elements["#item-list"].innerHTML;
   assert.match(html, /class="file-thumbnail generic-thumbnail"/);
   assert.match(html, />PY<\/span>/);
-  assert.match(html, /class="file-thumbnail image-thumbnail"/);
+  assert.match(html, /class="file-thumbnail image-thumbnail is-loading"/);
+  assert.match(html, /data-loading="true"/);
+  assert.match(html, /class="thumbnail-spinner"/);
   assert.match(html, /src="\/api\/files\/8\/preview"/);
   assert.match(html, /aria-label="放大图片 photo\.png"/);
+  assert.match(html, />128 B · png<\/span>/);
+  assert.doesNotMatch(html, /image\/png/);
 });
 
 test("share records omit usage status chips and normalize source labels", async () => {
@@ -779,8 +794,9 @@ test("share records omit usage status chips and normalize source labels", async 
   const html = harness.elements["#item-list"].innerHTML;
   assert.doesNotMatch(html, /尚未使用|尚未下载|已复制\s+\d+\s+次|已下载\s+\d+\s+次/);
   assert.doesNotMatch(html, /class="status-chip/);
-  assert.match(html, /<div class="item-meta"><span>4 字<\/span>/);
-  assert.match(html, /<div class="item-meta"><span>42 B<\/span>/);
+  assert.match(html, /<div class="item-meta"><span class="meta-line"><span>4 字<\/span>/);
+  assert.match(html, /<div class="item-meta"><span class="meta-line"><span>42 B<\/span>/);
+  assert.match(html, /<div class="item-meta"><span class="meta-line"><span>4 字<\/span>\s*<span><svg[\s\S]*?2026-06-13[\s\S]*?<\/span><\/span>\s*<span class="meta-line"><span><svg[\s\S]*?iOS · Safari<\/span>/);
   assert.match(html, />iOS · Safari<\/span>/);
   assert.match(html, />Windows · Chrome<\/span>/);
   assert.doesNotMatch(html, /iPhone · Safari · iOS|Windows PC · Chrome · Windows/);
@@ -835,6 +851,104 @@ test("share image thumbnail opens preview modal", async () => {
   assert.equal(harness.elements["#image-preview-image"].alt, "photo.png");
 });
 
+test("share loading image thumbnail blocks preview and shows toast", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 8,
+          kind: "file",
+          fileName: "photo.png",
+          fileSize: 128,
+          mimeType: "image/png",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const card = {
+    dataset: { kind: "file", itemId: "8" },
+    querySelector() {
+      return null;
+    },
+  };
+  const imageButton = { dataset: { loading: "true" } };
+  const imageTarget = {
+    closest(selector) {
+      if (selector === ".share-item") return card;
+      if (selector === ".image-thumbnail") return imageButton;
+      return null;
+    },
+  };
+
+  await harness.listeners["item-list:click"]({ target: imageTarget });
+
+  assert.equal(harness.elements["#image-preview-modal"].hidden, true);
+  assert.equal(harness.elements["#toast"].hidden, false);
+  assert.equal(harness.elements["#toast-message"].textContent, "正在下载，请稍后");
+});
+
+test("share image preview closes when any preview area is clicked", async () => {
+  const harness = shareHarness(async (path) => {
+    if (path === "/api/session") {
+      return response(200, { username: "demo", role: "user", csrfToken: "csrf-token", redirectTo: "/share.html" });
+    }
+    if (path === "/api/items") {
+      return response(200, {
+        items: [{
+          id: 8,
+          kind: "file",
+          fileName: "photo.png",
+          fileSize: 128,
+          mimeType: "image/png",
+          createdAt: "2026-06-13T08:30:00Z",
+          expiresAt: "2026-06-14T08:30:00Z",
+          uploaderDevice: "browser",
+          events: [],
+        }],
+      });
+    }
+    return response(404, { error: "not found" });
+  });
+
+  await flushAsync();
+  await flushAsync();
+
+  const card = {
+    dataset: { kind: "file", itemId: "8" },
+    querySelector() {
+      return null;
+    },
+  };
+  const imageButton = { dataset: { loading: "false" } };
+  const imageTarget = {
+    closest(selector) {
+      if (selector === ".share-item") return card;
+      if (selector === ".image-thumbnail") return imageButton;
+      return null;
+    },
+  };
+
+  await harness.listeners["item-list:click"]({ target: imageTarget });
+  assert.equal(harness.elements["#image-preview-modal"].hidden, false);
+
+  harness.listeners["image-preview-modal:click"]({ target: harness.elements["#image-preview-image"] });
+
+  assert.equal(harness.elements["#image-preview-modal"].hidden, true);
+  assert.equal(harness.elements["#image-preview-image"].alt, "");
+});
+
 test("share storage summary keeps desktop labels unwrapped and spaced", () => {
   assert.match(shareHtml, /class="storage-copy"/);
   assert.match(shareHtml, /<\/strong>\s+<small><span id="storage-percent"/);
@@ -850,9 +964,27 @@ test("share collapsed records use one-line previews and uniform height", () => {
   assert.match(styles, /\.text-preview \{[^}]*-webkit-line-clamp:\s*1/);
 });
 
+test("desktop share metadata uses one compact row with equal gaps", () => {
+  assert.match(styles, /\.item-meta \{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(4,\s*max-content\)[^}]*column-gap:\s*18px/);
+  assert.match(styles, /\.meta-line \{[^}]*display:\s*contents/);
+  assert.match(styles, /\.meta-line > span \{[^}]*white-space:\s*nowrap/);
+});
+
 test("mobile collapsed records show metadata without vertical clipping", () => {
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta \{[^}]*display:\s*grid[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)[^}]*overflow:\s*visible/);
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta > span \{[^}]*min-width:\s*0/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.item-meta \{[^}]*display:\s*grid[^}]*height:\s*auto[^}]*overflow:\s*visible/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.meta-line \{[^}]*display:\s*flex[^}]*gap:\s*12px/);
+  assert.doesNotMatch(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item:not\(\.is-expanded\) \.item-meta/);
+});
+
+test("mobile text details sit below the type badge like file details", () => {
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.share-item\.is-expanded \.text-detail \{[^}]*margin-top:\s*40px/);
+});
+
+test("image preview and thumbnail loading states stay bounded and visible", () => {
+  assert.match(styles, /\.image-preview-dialog \{[^}]*width:\s*min\(960px,\s*calc\(100vw - 48px\)\)[^}]*overflow:\s*hidden/);
+  assert.match(styles, /\.image-preview-dialog img \{[^}]*max-width:\s*100%[^}]*max-height:\s*calc\(100svh - 128px\)/);
+  assert.match(styles, /\.image-thumbnail\.is-loading img \{[^}]*filter:\s*brightness\(0\.55\)/);
+  assert.match(styles, /\.thumbnail-spinner \{[^}]*animation:\s*spin 800ms linear infinite/);
 });
 
 test("composer text input matches the file drop zone height", () => {
