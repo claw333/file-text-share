@@ -9,6 +9,7 @@ const shareHtml = fs.readFileSync("share.html", "utf8");
 const adminHtml = fs.readFileSync("admin.html", "utf8");
 const profileHtml = fs.readFileSync("profile.html", "utf8");
 const styles = fs.readFileSync("styles.css", "utf8");
+const dockerfile = fs.readFileSync("Dockerfile", "utf8");
 const favicon = fs.readFileSync("favicon.png");
 
 function relativeLuminance(hex) {
@@ -886,6 +887,10 @@ test("all pages reference the project favicon", () => {
   for (const html of [indexHtml, shareHtml, adminHtml, profileHtml]) {
     assert.match(html, /<link rel="icon" type="image\/png" href="favicon\.png" \/>/);
   }
+});
+
+test("docker build context includes embedded favicon asset", () => {
+  assert.match(dockerfile, /COPY .*favicon\.png/);
 });
 
 test("landing login page omits footer security text and feature badges", () => {
