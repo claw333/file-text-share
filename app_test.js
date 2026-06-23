@@ -41,6 +41,124 @@ function flushAsync() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function loginHarness(fetchImpl) {
+  const listeners = {};
+  function element(extra = {}) {
+    return {
+      hidden: false,
+      textContent: "",
+      value: "",
+      type: "",
+      disabled: false,
+      innerHTML: "",
+      attrs: {},
+      classNames: new Set(),
+      classList: {
+        add(name) {
+          this.owner.classNames.add(name);
+        },
+        remove(name) {
+          this.owner.classNames.delete(name);
+        },
+        toggle(name, value) {
+          if (value) this.owner.classNames.add(name);
+          else this.owner.classNames.delete(name);
+        },
+        contains(name) {
+          return this.owner.classNames.has(name);
+        },
+      },
+      setAttribute(name, value) {
+        this.attrs[name] = value;
+      },
+      removeAttribute(name) {
+        delete this.attrs[name];
+      },
+      addEventListener(type, handler) {
+        listeners[type] = handler;
+      },
+      closest() {
+        return null;
+      },
+      focus() {},
+      ...extra,
+    };
+  }
+  const usernameField = element();
+  const passwordField = element();
+  const usernameInput = element({
+    closest(selector) {
+      return selector === ".field" ? usernameField : null;
+    },
+    addEventListener(type, handler) {
+      listeners[`username:${type}`] = handler;
+    },
+  });
+  const passwordInput = element({
+    type: "password",
+    closest(selector) {
+      return selector === ".field" ? passwordField : null;
+    },
+    addEventListener(type, handler) {
+      listeners[`password:${type}`] = handler;
+    },
+  });
+  const submitButton = element({ innerHTML: "安全登录" });
+  const form = element({
+    querySelector(selector) {
+      return selector === "button[type='submit']" ? submitButton : null;
+    },
+    addEventListener(type, handler) {
+      listeners[`form:${type}`] = handler;
+    },
+  });
+  for (const candidate of [usernameField, passwordField, usernameInput, passwordInput, submitButton, form]) {
+    candidate.classList.owner = candidate;
+  }
+  const elements = {
+    "#username": usernameInput,
+    "#password": passwordInput,
+    "#username-error": element({ hidden: true }),
+    "#password-error": element({ hidden: true }),
+    ".password-toggle": element({
+      addEventListener(type, handler) {
+        listeners[`password-toggle:${type}`] = handler;
+      },
+    }),
+    "#login-form": form,
+    "#login-error": element({ hidden: true }),
+  };
+  elements[".password-toggle"].classList.owner = elements[".password-toggle"];
+  elements["#login-error"].classList.owner = elements["#login-error"];
+  elements["#username-error"].classList.owner = elements["#username-error"];
+  elements["#password-error"].classList.owner = elements["#password-error"];
+  const redirects = [];
+  const context = {
+    Headers,
+    FormData: class FormData {},
+    fetch: fetchImpl,
+    window: {
+      clearTimeout() {},
+      setTimeout() {
+        return 1;
+      },
+      location: {
+        replace(target) {
+          redirects.push(target);
+        },
+      },
+    },
+    document: {
+      body: { dataset: { page: "login" } },
+      querySelector(selector) {
+        return elements[selector] || null;
+      },
+    },
+  };
+  vm.runInNewContext(source, context);
+  return { elements, fields: { usernameField, passwordField }, listeners, redirects };
+}
+
 function profileHarness(fetchImpl) {
   const listeners = {};
   const elements = {
@@ -387,6 +505,72 @@ function adminHarness(fetchImpl) {
   vm.runInNewContext(source, context);
   return { elements, listeners, redirects };
 }
+
+test("login required fields block empty submit and mark both inputs", async () => {
+  const requests = [];
+  const harness = loginHarness(async (path) => {
+    requests.push(path);
+    return response(401, { error: "用户名或密码错误" });
+  });
+
+  await harness.listeners["form:submit"]({ preventDefault() {} });
+
+  assert.deepEqual(requests, []);
+  assert.equal(harness.elements["#login-error"].hidden, true);
+  assert.equal(harness.elements["#username-error"].hidden, false);
+  assert.equal(harness.elements["#password-error"].hidden, false);
+  assert.equal(harness.elements["#username-error"].textContent, "请输入用户名");
+  assert.equal(harness.elements["#password-error"].textContent, "请输入密码");
+  assert.equal(harness.elements["#username"].attrs["aria-invalid"], "true");
+  assert.equal(harness.elements["#password"].attrs["aria-invalid"], "true");
+  assert.equal(harness.elements["#username"].attrs["aria-describedby"], "username-error");
+  assert.equal(harness.elements["#password"].attrs["aria-describedby"], "password-error");
+  assert.equal(harness.fields.usernameField.classList.contains("is-invalid"), true);
+  assert.equal(harness.fields.passwordField.classList.contains("is-invalid"), true);
+});
+
+test("login required validation marks only the empty password field", async () => {
+  const requests = [];
+  const harness = loginHarness(async (path) => {
+    requests.push(path);
+    return response(401, { error: "用户名或密码错误" });
+  });
+  harness.elements["#username"].value = "demo";
+
+  await harness.listeners["form:submit"]({ preventDefault() {} });
+
+  assert.deepEqual(requests, []);
+  assert.equal(harness.elements["#login-error"].hidden, true);
+  assert.equal(harness.elements["#username-error"].hidden, true);
+  assert.equal(harness.elements["#password-error"].hidden, false);
+  assert.equal(harness.elements["#password-error"].textContent, "请输入密码");
+  assert.equal(harness.elements["#username"].attrs["aria-invalid"], undefined);
+  assert.equal(harness.elements["#password"].attrs["aria-invalid"], "true");
+  assert.equal(harness.elements["#username"].attrs["aria-describedby"], undefined);
+  assert.equal(harness.elements["#password"].attrs["aria-describedby"], "password-error");
+  assert.equal(harness.fields.usernameField.classList.contains("is-invalid"), false);
+  assert.equal(harness.fields.passwordField.classList.contains("is-invalid"), true);
+});
+
+test("login backend errors still show after required fields pass", async () => {
+  const requests = [];
+  const harness = loginHarness(async (path, config) => {
+    requests.push({ path, config });
+    return response(401, { error: "用户名或密码错误" });
+  });
+  harness.elements["#username"].value = "demo";
+  harness.elements["#password"].value = "WrongPassword#2026";
+
+  await harness.listeners["form:submit"]({ preventDefault() {} });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/login");
+  assert.equal(harness.elements["#login-error"].textContent, "用户名或密码错误");
+  assert.equal(harness.elements["#username"].attrs["aria-invalid"], undefined);
+  assert.equal(harness.elements["#password"].attrs["aria-invalid"], undefined);
+  assert.equal(harness.elements["#username-error"].hidden, true);
+  assert.equal(harness.elements["#password-error"].hidden, true);
+});
 
 test("profile password error stays on page and shows backend message", async () => {
   const requests = [];
@@ -1053,6 +1237,17 @@ test("mobile login secondary text keeps accessible contrast", () => {
   const mobileLoginTextColor = "#536077";
   assert.ok(contrastRatio(mobileLoginTextColor, "#eef3fb") >= 4.5);
   assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-card-heading > p:last-child \{[^}]*color:\s*#536077/);
+});
+
+test("login required validation uses Ant Design style field errors", () => {
+  assert.match(indexHtml, /id="username-error"[^>]*class="field-error"[^>]*role="alert"[^>]*hidden/);
+  assert.match(indexHtml, /id="password-error"[^>]*class="field-error"[^>]*role="alert"[^>]*hidden/);
+  assert.match(styles, /\.field-error \{[^}]*margin-top:\s*6px[^}]*color:\s*var\(--red\)[^}]*font-size:\s*12px/);
+  assert.match(styles, /\.field\.is-invalid \.input-wrap input \{[^}]*border-color:\s*var\(--red\)[^}]*background:\s*white/);
+  assert.match(styles, /\.field\.is-invalid \.input-wrap input:focus \{[^}]*box-shadow:\s*0 0 0 3px rgba\(193,\s*72,\s*72,\s*0\.12\)/);
+  assert.match(styles, /\.form-error \{[^}]*background:\s*transparent/);
+  assert.doesNotMatch(styles, /\.field\.is-invalid \.input-wrap input \{[^}]*background:\s*#fffafa/);
+  assert.doesNotMatch(styles, /\.form-error \{[^}]*padding:\s*10px/);
 });
 
 test("mobile admin quota and password controls use separate aligned rows", () => {

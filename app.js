@@ -36,10 +36,47 @@
   }
 
   if (page === "login") {
+    const usernameInput = document.querySelector("#username");
     const passwordInput = document.querySelector("#password");
     const passwordToggle = document.querySelector(".password-toggle");
     const form = document.querySelector("#login-form");
     const error = document.querySelector("#login-error");
+    const usernameError = document.querySelector("#username-error");
+    const passwordError = document.querySelector("#password-error");
+
+    function setFieldInvalid(input, errorElement, errorId, message) {
+      const invalid = Boolean(message);
+      input.closest(".field")?.classList.toggle("is-invalid", invalid);
+      if (invalid) {
+        input.setAttribute("aria-invalid", "true");
+        input.setAttribute("aria-describedby", errorId);
+        errorElement.textContent = message;
+        errorElement.hidden = false;
+      } else {
+        input.removeAttribute("aria-invalid");
+        input.removeAttribute("aria-describedby");
+        errorElement.textContent = "";
+        errorElement.hidden = true;
+      }
+    }
+
+    function clearFieldError(input, errorElement, errorId) {
+      setFieldInvalid(input, errorElement, errorId, "");
+      error.hidden = true;
+    }
+
+    function validateLoginRequired() {
+      const missingUsername = !usernameInput.value.trim();
+      const missingPassword = !passwordInput.value;
+      setFieldInvalid(usernameInput, usernameError, "username-error", missingUsername ? "请输入用户名" : "");
+      setFieldInvalid(passwordInput, passwordError, "password-error", missingPassword ? "请输入密码" : "");
+      error.hidden = true;
+      if (!missingUsername && !missingPassword) {
+        return true;
+      }
+      (missingUsername ? usernameInput : passwordInput).focus();
+      return false;
+    }
 
     passwordToggle.addEventListener("click", function () {
       const show = passwordInput.type === "password";
@@ -49,18 +86,18 @@
       passwordInput.focus();
     });
 
+    usernameInput.addEventListener("input", function () {
+      clearFieldError(usernameInput, usernameError, "username-error");
+    });
+
     passwordInput.addEventListener("input", function () {
-      error.hidden = true;
+      clearFieldError(passwordInput, passwordError, "password-error");
     });
 
     form.addEventListener("submit", async function (event) {
       event.preventDefault();
-      const username = document.querySelector("#username").value.trim();
-      if (!username || !passwordInput.value) {
-        error.textContent = "用户名或密码错误";
-        error.hidden = false;
-        return;
-      }
+      if (!validateLoginRequired()) return;
+      const username = usernameInput.value.trim();
 
       const submit = form.querySelector("button[type='submit']");
       submit.disabled = true;
