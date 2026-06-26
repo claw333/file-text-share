@@ -42,12 +42,14 @@ services:
         condition: service_healthy
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
-      NGINX_ENVSUBST_FILTER: ^PUBLIC_HOST$
+      DOODLE_HOST: ${DOODLE_HOST:?Set DOODLE_HOST in .env}
+      NGINX_ENVSUBST_FILTER: ^(PUBLIC_HOST|DOODLE_HOST)$
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./deploy/nginx/app.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ${DOODLE_STATIC_ROOT:-./doodle-static}:/usr/share/nginx/doodle:ro
       - letsencrypt:/etc/letsencrypt:ro
       - certbot-webroot:/var/www/certbot:ro
     networks:
@@ -80,7 +82,8 @@ services:
     profiles: ["bootstrap"]
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:?Set PUBLIC_HOST in .env}
-      NGINX_ENVSUBST_FILTER: ^PUBLIC_HOST$
+      DOODLE_HOST: ${DOODLE_HOST:?Set DOODLE_HOST in .env}
+      NGINX_ENVSUBST_FILTER: ^(PUBLIC_HOST|DOODLE_HOST)$
     ports:
       - "80:80"
     volumes:

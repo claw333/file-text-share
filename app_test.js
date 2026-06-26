@@ -9,8 +9,12 @@ const shareHtml = fs.readFileSync("share.html", "utf8");
 const adminHtml = fs.readFileSync("admin.html", "utf8");
 const profileHtml = fs.readFileSync("profile.html", "utf8");
 const styles = fs.readFileSync("styles.css", "utf8");
+const stylesInput = fs.existsSync("styles.input.css") ? fs.readFileSync("styles.input.css", "utf8") : "";
+const packageJson = fs.existsSync("package.json") ? fs.readFileSync("package.json", "utf8") : "";
+const dockerignore = fs.existsSync(".dockerignore") ? fs.readFileSync(".dockerignore", "utf8") : "";
 const dockerfile = fs.readFileSync("Dockerfile", "utf8");
 const favicon = fs.readFileSync("favicon.png");
+const serverGo = fs.readFileSync("server.go", "utf8");
 
 function relativeLuminance(hex) {
   const normalized = hex.replace("#", "");
@@ -1204,10 +1208,10 @@ test("app footers omit the device timezone note", () => {
 });
 
 test("mobile login uses the light login background only", () => {
-  assert.match(indexHtml, /<meta name="theme-color" content="#eef3fb" \/>/);
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-body \{[^}]*background:\s*#eef3fb/);
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-shell \{[^}]*min-height:\s*100svh;[^}]*background:\s*#eef3fb/);
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-panel \{[^}]*background:\s*#eef3fb/);
+  assert.match(indexHtml, /<meta name="theme-color" content="#f1eafe" \/>/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-body \{[^}]*background:\s*#f1eafe/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-shell \{[^}]*min-height:\s*100svh;[^}]*background:\s*#f1eafe/);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-panel \{[^}]*background:\s*#f1eafe/);
 });
 
 test("all pages reference the project favicon", () => {
@@ -1234,9 +1238,32 @@ test("landing login page omits footer security text and feature badges", () => {
 });
 
 test("mobile login secondary text keeps accessible contrast", () => {
-  const mobileLoginTextColor = "#536077";
-  assert.ok(contrastRatio(mobileLoginTextColor, "#eef3fb") >= 4.5);
-  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-card-heading > p:last-child \{[^}]*color:\s*#536077/);
+  const mobileLoginTextColor = "#4b4268";
+  assert.ok(contrastRatio(mobileLoginTextColor, "#f1eafe") >= 4.5);
+  assert.match(styles, /@media \(max-width: 760px\) \{[\s\S]*?\.login-card-heading > p:last-child \{[^}]*color:\s*#4b4268/);
+});
+
+test("frontend style build uses Tailwind CLI without changing backend embeds", () => {
+  assert.match(packageJson, /"build:css":\s*"tailwindcss -i \.\/styles\.input\.css -o \.\/styles\.css"/);
+  assert.match(packageJson, /"tailwindcss":/);
+  assert.match(packageJson, /"@tailwindcss\/cli":/);
+  assert.match(dockerignore, /^node_modules\/?$/m);
+  assert.match(stylesInput, /@import "tailwindcss";/);
+  assert.match(stylesInput, /@source "\.\/\*\.html";/);
+  assert.match(stylesInput, /@source "\.\/app\.js";/);
+  assert.match(serverGo, /\/\/go:embed index\.html share\.html admin\.html profile\.html styles\.css app\.js favicon\.png/);
+  assert.doesNotMatch(serverGo, /styles\.input\.css|package\.json|node_modules/);
+});
+
+test("doodle UI theme uses hand-drawn infographic tokens", () => {
+  assert.match(stylesInput, /--doodle-paper:\s*#f1eafe/);
+  assert.match(stylesInput, /--doodle-ink:\s*#171717/);
+  assert.match(stylesInput, /--doodle-highlight:\s*#b9ff66/);
+  assert.match(stylesInput, /\.doodle-card \{[^}]*border:\s*3px solid var\(--doodle-ink\)[^}]*box-shadow:\s*8px 8px 0 var\(--doodle-shadow\)/);
+  assert.match(stylesInput, /\.marker-title \{[^}]*background:\s*linear-gradient\(transparent 54%, var\(--doodle-highlight\) 54%\)/);
+  assert.match(stylesInput, /\.login-copy \.eyebrow \{[^}]*color:\s*var\(--doodle-ink\)[^}]*background:\s*var\(--doodle-pink\)/);
+  assert.match(stylesInput, /\.login-card,\s*\.composer-card,\s*\.share-item,\s*\.profile-card,\s*\.admin-user-card \{[^}]*border:\s*3px solid var\(--doodle-ink\)/);
+  assert.match(stylesInput, /\.button-primary \{[^}]*background:\s*var\(--doodle-highlight\)[^}]*border:\s*3px solid var\(--doodle-ink\)/);
 });
 
 test("login required validation uses Ant Design style field errors", () => {

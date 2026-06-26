@@ -22,3 +22,19 @@ server {
         return 308 https://${PUBLIC_HOST}$request_uri;
     }
 }
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOODLE_HOST};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 308 https://${DOODLE_HOST}$request_uri;
+    }
+}
